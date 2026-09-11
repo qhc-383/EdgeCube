@@ -380,6 +380,61 @@ class InstanceController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 「删库跑路」：一次性删除全部实例及其全部文件。
+  ///
+  /// 删除范围：
+  /// - 实例根目录 `<edgecube-root>/instances`（连同各实例下的 mods / plugins /
+  ///   存档 / 配置等全部文件）整体递归删除；
+  /// - 自定义路径实例（如 proot rootfs 内的 `/opt/{id}`）的目录逐个递归删除；
+  /// - `config/instances/<id>.json` 全部实例配置文件；
+  /// - 实例索引清空（选中项置空）。
+  ///
+  /// 操作不可恢复，调用方必须先做二次确认。删除过程中单个目录失败只记录日志并
+  /// 继续（尽力删净），索引仍在最后清空。
+  Future<void> deleteAllInstances() async {
+    final summaries = List<InstanceSummary>.of(_summaries);
+
+    // 默认根目录整体删除：实例及其实例内的 mods / plugins 一并消失。
+    try {
+      final root = await _rootResolver();
+      if (await root.exists()) {
+        await root.delete(recursive: true);
+      }
+    } catch (e, s) {
+      _log.warning('删除实例根目录失败', e, s);
+    }
+
+    // 自定义路径实例不在默认根目录下，按各自路径逐个删除。
+    for (final summary in summaries) {
+      final customPath = summary.path;
+      if (customPath == null || customPath.isEmpty) continue;
+      try {
+        final dir = Directory(customPath);
+        if (await dir.exists()) {
+          await dir.delete(recursive: true);
+        }
+      } catch (e, s) {
+        _log.warning('删除实例目录失败：$customPath', e, s);
+      }
+    }
+
+    // 删除全部实例配置文件。
+    for (final summary in summaries) {
+      try {
+        await _store.deleteConfig(summary.id);
+      } catch (e, s) {
+        _log.warning('删除实例配置失败：${summary.id}', e, s);
+      }
+    }
+
+    _summaries = [];
+    _selectedId = null;
+    _selected = null;
+    _filesRevision++;
+    await _store.saveIndex(const [], null);
+    notifyListeners();
+  }
+
   /// 解析指定实例是否启用兼容模式（供服务端状态机在原生回放时按 id 查询）。
   Future<bool> compatModeFor(String id) async {
     final config = await _configFor(id);
