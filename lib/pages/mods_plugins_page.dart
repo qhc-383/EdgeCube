@@ -204,8 +204,15 @@ class _ContentTab extends StatefulWidget {
   State<_ContentTab> createState() => _ContentTabState();
 }
 
-class _ContentTabState extends State<_ContentTab> {
+class _ContentTabState extends State<_ContentTab>
+    with AutomaticKeepAliveClientMixin {
   static const _service = FileService();
+
+  /// 每批交给一个 isolate 的文件数。
+  ///
+  /// 这个值只影响「几次 isolate 往返」和「结果分几批上屏」：太小会退回成
+  /// 一文件一 isolate（原来的卡顿来源），太大则首个批次要等更久才显示元数据。
+  static const _batchSize = 32;
 
   // 文件列表
   List<FileEntry> _entries = [];
@@ -232,6 +239,12 @@ class _ContentTabState extends State<_ContentTab> {
 
   // ── 加载文件列表 ──────────────────────────────────────────────
 
+  /// 保持标签页存活：从「模组管理」滑到「模组下载」再滑回来时，TabBarView 默认
+  /// 会销毁并重建本页 —— 于是目录重扫、每个 jar 重新解析元数据/算哈希/拉图标，
+  /// 用户看到的就是来回滑动一路卡。保活后这些结果直接复用。
+  @override
+  bool get wantKeepAlive => true;
+
   Future<void> _load() async {
     setState(() => _loading = true);
     final entries = await _service.list(widget.folder);
@@ -257,16 +270,11 @@ class _ContentTabState extends State<_ContentTab> {
 
   // ── 模组识别 ──────────────────────────────────────────────────
 
-  /// 单个文件解析失败时返null，避免异常中断批量处理
-  Future<ModMetadata?> _safeParse(String path) async {
-    try {
-      return await ModMetadataParser.parse(path);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// 分批并行解析模组元数据，每批完成后统一 setState，避免频繁重建列表
+  /// 分批解析模组元数据，每批完成后统一 setState，避免频繁重建列表。
+  ///
+  /// 批量交给同一个 isolate（见 [ModMetadataParser.parseAll]），不再一文件一
+  /// isolate：模组数量多时，isolate 创建本身就是主要开销，会在滑动时持续抢占
+  /// 主 isolate 的时间片。
   Future<void> _identifyMods() async {
     // 使用 _isPluginFile 而非 _isJar，使 .phar 文件也能被识
     final plugins = _entries
@@ -274,16 +282,16 @@ class _ContentTabState extends State<_ContentTab> {
         .toList();
     if (plugins.isEmpty) return;
 
-    // 每批并行解析 6 个：平衡 isolate 开销UI 响应
-    const batchSize = 6;
-    for (var i = 0; i < plugins.length; i += batchSize) {
-      final end = (i + batchSize).clamp(0, plugins.length);
+    for (var i = 0; i < plugins.length; i += _batchSize) {
+      final end = (i + _batchSize).clamp(0, plugins.length);
       final batch = plugins.sublist(i, end);
-      final results = await Future.wait(batch.map((e) => _safeParse(e.path)));
+      final results = await ModMetadataParser.parseAll(
+        [for (final e in batch) e.path],
+      );
       if (!mounted) return;
       setState(() {
         for (var j = 0; j < batch.length; j++) {
-          _metadata[batch[j].path] = results[j];
+          _metadata[batch[j].path] = results[batch[j].path];
         }
       });
     }
@@ -293,26 +301,23 @@ class _ContentTabState extends State<_ContentTab> {
 
   // ── 获取模组图标 ──────────────────────────────────────────────
 
-  /// 安全计算 SHA1，失败时返回空串占位
-  Future<(String, String)> _safeSha1(String path) async {
-    try {
-      final hash = await ModrinthService.computeSha1(path);
-      return (path, hash);
-    } catch (_) {
-      return (path, '');
-    }
-  }
-
-  /// 分批并行计算 SHA1，限制并发度避免同时打开过多文件 / 创建过多 isolate
+  /// 分块计算 SHA1：每块一次 isolate，读文件与哈希都在后台完成。
+  ///
+  /// 旧实现是「每个 jar 一次 compute」，一目录模组就要建上百个 isolate；
+  /// 现在每块只用一次 isolate 往返（读取失败的文件哈希为空串，跳过即可）。
   Future<List<(String, String)>> _computeHashesBatched(
     List<FileEntry> jars,
   ) async {
-    const batchSize = 8;
     final results = <(String, String)>[];
-    for (var i = 0; i < jars.length; i += batchSize) {
-      final end = (i + batchSize).clamp(0, jars.length);
+    for (var i = 0; i < jars.length; i += _batchSize) {
+      final end = (i + _batchSize).clamp(0, jars.length);
       final batch = jars.sublist(i, end);
-      results.addAll(await Future.wait(batch.map((j) => _safeSha1(j.path))));
+      final hashes = await ModrinthService.computeSha1Batch(
+        [for (final j in batch) j.path],
+      );
+      for (final j in batch) {
+        results.add((j.path, hashes[j.path] ?? ''));
+      }
     }
     return results;
   }
@@ -507,7 +512,8 @@ class _ContentTabState extends State<_ContentTab> {
 
   /// 对单jar 文件重新识别元数据、计SHA1 并获取图标
   Future<void> _identifySingleMod(FileEntry entry) async {
-    final meta = await _safeParse(entry.path);
+    // 单个文件直接走批量接口（内部仍是同一个 isolate），解析失败返回 null。
+    final meta = (await ModMetadataParser.parseAll([entry.path]))[entry.path];
     if (!mounted) return;
     setState(() => _metadata[entry.path] = meta);
 
@@ -929,6 +935,8 @@ class _ContentTabState extends State<_ContentTab> {
 
   @override
   Widget build(BuildContext context) {
+    // AutomaticKeepAliveClientMixin 要求先调用 super.build 才会挂上保活信号。
+    super.build(context);
     final theme = MiuixTheme.of(context);
     if (_loading) return const Center(child: CircularProgressIndicator());
     return Column(

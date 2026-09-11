@@ -66,6 +66,26 @@ class ModMetadataParser {
     return compute(_parseSync, path);
   }
 
+  /// 批量解析：**整批文件交给同一个 isolate**，返回 {path: metadata}。
+  ///
+  /// 不用 [parse] 逐个文件循环的原因：`compute` 每次都新建一个 isolate，
+  /// 而 isolate 启动/销毁本身就是毫秒级开销——一个装了几十上百个模组的
+  /// `mods/` 目录会瞬间创建上百个 isolate，主 isolate 抢不到时间片，
+  /// 表现就是列表滑动持续掉帧。整批一次往返后开销与文件数无关。
+  ///
+  /// 无法识别的文件在结果里为 `null`（与 [parse] 一致，不抛异常）。
+  static Future<Map<String, ModMetadata?>> parseAll(List<String> paths) async {
+    if (paths.isEmpty) return const <String, ModMetadata?>{};
+    return compute(_parseAllSync, paths);
+  }
+
+  /// 在 isolate 中同步执行：逐个读取文件 → 解压 → 解析元数据。
+  static Map<String, ModMetadata?> _parseAllSync(List<String> paths) {
+    return <String, ModMetadata?>{
+      for (final path in paths) path: _parseSync(path),
+    };
+  }
+
   /// 在 isolate 中同步执行：读取文件 → 解压 → 解析元数据。
   /// 根据文件扩展名自动选择解析路径。
   static ModMetadata? _parseSync(String path) {

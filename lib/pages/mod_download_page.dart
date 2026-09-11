@@ -43,7 +43,8 @@ class ModDownloadPage extends StatefulWidget {
   State<ModDownloadPage> createState() => _ModDownloadPageState();
 }
 
-class _ModDownloadPageState extends State<ModDownloadPage> {
+class _ModDownloadPageState extends State<ModDownloadPage>
+    with AutomaticKeepAliveClientMixin {
   final _controller = TextEditingController();
   final _scrollCtrl = ScrollController();
 
@@ -85,6 +86,14 @@ class _ModDownloadPageState extends State<ModDownloadPage> {
     _scrollCtrl.dispose();
     super.dispose();
   }
+
+  /// 保持标签页存活。
+  ///
+  /// 本页嵌在「模组/插件管理」的 TabBarView 里，默认滑走即销毁：滑回来会重新
+  /// 初始化平台、重新拉游戏版本标签、重新搜索并重建整个结果列表——滑动过程中
+  /// 的卡顿就来自这些重复的网络请求与列表重建。保活后切回标签页是瞬时的。
+  @override
+  bool get wantKeepAlive => true;
 
   /// 初始化可用平台列表（按 isAvailable 过滤，如 CF 无 Key 且未开镜像则剔除）。
   Future<void> _initSources() async {
@@ -245,6 +254,8 @@ class _ModDownloadPageState extends State<ModDownloadPage> {
 
   @override
   Widget build(BuildContext context) {
+    // AutomaticKeepAliveClientMixin 要求先调用 super.build 才会挂上保活信号。
+    super.build(context);
     final theme = MiuixTheme.of(context);
     return MiuixScaffold(
       // 内嵌在「模组与插件」标签页中时不显示自己的顶栏。

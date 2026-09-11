@@ -3,6 +3,14 @@ import 'package:flutter_miuix/miuix.dart';
 
 import 'miuix_dialog.dart';
 
+/// 「超过这么多项就改用惰性列表」的阈值。
+///
+/// 少量选项时用 `Column` 能自适应内容高度（弹窗紧凑、不留空白）；但游戏版本
+/// 这类选项动辄上千条（Modrinth 的标签含 alpha/beta/snapshot），`Column` 会在
+/// 弹窗打开的瞬间把所有行一次性建出来，之后每帧还要重绘整列——开窗卡、滑动更卡。
+/// 超过阈值就换成固定高度的 [ListView.builder]，只构建可见行。
+const int _kSingleChoiceLazyThreshold = 40;
+
 /// 单选弹窗：一列单选项，点中即返回该项并关闭。
 ///
 /// 取代原先「SimpleDialog + 一堆带单选图标的 ListTile」的重复写法
@@ -21,27 +29,60 @@ Future<T?> showMiuixSingleChoice<T>({
     title: title,
     builder: (ctx) {
       final theme = MiuixTheme.of(ctx);
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (final option in options)
-            MiuixRadioButtonPreference(
-              title: labelOf(ctx, option),
-              summary: summaryOf?.call(ctx, option),
-              selected: option == selected,
-              insideMargin: const EdgeInsets.symmetric(vertical: 10),
-              onClick: () => Navigator.of(ctx).pop(option),
-            ),
-          if (hint != null) ...[
-            const SizedBox(height: 8),
-            MiuixText(
-              hint,
-              style: theme.textStyles.footnote1,
-              color: theme.colors.onSurfaceVariantSummary,
-            ),
-          ],
-        ],
+      final maxHeight = MediaQuery.sizeOf(ctx).height * 0.62;
+
+      MiuixRadioButtonPreference rowAt(int index) {
+        final option = options[index];
+        return MiuixRadioButtonPreference(
+          title: labelOf(ctx, option),
+          summary: summaryOf?.call(ctx, option),
+          selected: option == selected,
+          insideMargin: const EdgeInsets.symmetric(vertical: 10),
+          onClick: () => Navigator.of(ctx).pop(option),
+        );
+      }
+
+      Widget hintWidget() => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        child: MiuixText(
+          hint!,
+          style: theme.textStyles.footnote1,
+          color: theme.colors.onSurfaceVariantSummary,
+        ),
+      );
+
+      // 超长选项（如游戏版本）：固定高度 + 惰性构建，滑动只处理可见行。
+      if (options.length > _kSingleChoiceLazyThreshold) {
+        return SizedBox(
+          height: maxHeight,
+          child: ListView.builder(
+            padding: EdgeInsets.zero,
+            itemCount: options.length + (hint != null ? 1 : 0),
+            itemBuilder: (ctx, i) =>
+                i < options.length ? rowAt(i) : hintWidget(),
+          ),
+        );
+      }
+
+      return ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: maxHeight),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (var i = 0; i < options.length; i++) rowAt(i),
+              if (hint != null) ...[
+                const SizedBox(height: 8),
+                MiuixText(
+                  hint,
+                  style: theme.textStyles.footnote1,
+                  color: theme.colors.onSurfaceVariantSummary,
+                ),
+              ],
+            ],
+          ),
+        ),
       );
     },
   );

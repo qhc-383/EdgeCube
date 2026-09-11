@@ -14,6 +14,8 @@ import '../instance/instance_scope.dart';
 import '../server/server_service.dart';
 import '../widgets/ec_preference.dart';
 import '../widgets/error_dialog.dart';
+import '../widgets/miuix_dialog.dart';
+import '../widgets/miuix_snackbar.dart';
 import 'allay_properties_page.dart';
 import 'instance_export_page.dart';
 import 'mods_plugins_page.dart';
@@ -129,10 +131,74 @@ class ManagePage extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               const _UpdateServerTile(),
+              const SizedBox(height: 12),
+              const _WipeEverythingTile(),
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 「删库跑路」入口：一键删除全部实例及其全部文件（含各实例下的 mods /
+/// plugins / 存档 / 配置）与实例索引，操作不可恢复。
+///
+/// 服务端运行中时拒绝执行，提示先停止；删除前弹出确认框二次确认。
+class _WipeEverythingTile extends StatefulWidget {
+  const _WipeEverythingTile();
+
+  @override
+  State<_WipeEverythingTile> createState() => _WipeEverythingTileState();
+}
+
+class _WipeEverythingTileState extends State<_WipeEverythingTile> {
+  bool _busy = false;
+
+  Future<void> _wipe() async {
+    final ctrl = InstanceScope.of(context);
+
+    // 服务端运行中不允许删库：先停止再操作，避免留下半删除状态。
+    if (await ServerService().isRunning()) {
+      if (!mounted) return;
+      showErrorDialog(context, context.tr('manage.wipeAll.serverRunning'));
+      return;
+    }
+
+    if (!mounted) return;
+    final confirmed = await showMiuixConfirm(
+      context,
+      title: context.tr('manage.wipeAll.confirmTitle'),
+      message: context.tr('manage.wipeAll.confirmMessage'),
+      confirmLabel: context.tr('manage.wipeAll.confirmAction'),
+    );
+    if (!confirmed || !mounted) return;
+
+    setState(() => _busy = true);
+    try {
+      await ctrl.deleteAllInstances();
+      if (!mounted) return;
+      showMiuixSnackbar(context.tr('manage.wipeAll.success'));
+    } catch (e) {
+      if (!mounted) return;
+      showErrorDialog(
+        context,
+        context.tr('manage.wipeAll.failed', {'error': '$e'}),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = MiuixTheme.of(context);
+    return _ManageEntryTile(
+      icon: Icons.delete_forever,
+      iconColor: theme.colors.error,
+      title: context.tr('manage.wipeAll.title'),
+      subtitle: context.tr('manage.wipeAll.subtitle'),
+      onTap: _busy ? null : _wipe,
     );
   }
 }
@@ -355,12 +421,17 @@ class _ManageEntryTile extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.onTap,
+    this.iconColor,
   });
 
   final IconData icon;
   final String title;
   final String subtitle;
-  final VoidCallback onTap;
+  /// 传 null 表示当前不可点击（如正在进行删除）。
+  final VoidCallback? onTap;
+
+  /// 图标配色；为 null 时用主题默认色。危险操作（如「删库跑路」）可传 error 色。
+  final Color? iconColor;
 
   @override
   Widget build(BuildContext context) {
@@ -368,7 +439,7 @@ class _ManageEntryTile extends StatelessWidget {
       child: MiuixBasicComponent(
         startAction: Padding(
           padding: const EdgeInsets.only(right: 16),
-          child: Icon(icon, size: 36),
+          child: Icon(icon, size: 36, color: iconColor),
         ),
         content: [
           Column(
