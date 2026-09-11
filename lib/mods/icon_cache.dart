@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -25,13 +26,44 @@ class ModIconCache {
   /// 进行中的下载：URL → Future，避免并发重复下载
   final Map<String, Future<Uint8List?>> _pending = {};
 
+  /// 同时进行的网络下载上限。
+  ///
+  /// 列表快速滑动时「新出现的图标」会集中发起请求，若不限流，一次滑动就能
+  /// 同时开几十上百个 HTTP 连接：连接建立、TLS 握手、回调切回主 isolate 都要
+  /// 抢 CPU，正是列表滑动掉帧的常见来源（也更容易触发 Modrinth CDN 限流）。
+  /// 排队执行后总耗时接近，但每帧的主线程压力小得多。
+  static const _maxConcurrentDownloads = 4;
+  int _activeDownloads = 0;
+  final List<Completer<void>> _downloadQueue = [];
+
+  Future<void> _acquireDownloadSlot() async {
+    if (_activeDownloads < _maxConcurrentDownloads) {
+      _activeDownloads++;
+      return;
+    }
+    final waiter = Completer<void>();
+    _downloadQueue.add(waiter);
+    await waiter.future;
+  }
+
+  void _releaseDownloadSlot() {
+    if (_downloadQueue.isEmpty) {
+      _activeDownloads--;
+      return;
+    }
+    // 直接把名额移交给队首等待者，不必先减后加。
+    _downloadQueue.removeAt(0).complete();
+  }
+
   Directory? _cacheDir;
 
   Future<Directory> _getCacheDir() async {
     if (_cacheDir != null) return _cacheDir!;
     final tmp = await getTemporaryDirectory();
     final dir = Directory(p.join(tmp.path, 'mod_icons'));
-    if (!dir.existsSync()) dir.createSync(recursive: true);
+    // 用异步版本：磁盘探测/建目录同样会阻塞主线程，页面初始化时成批出现
+    // 模组卡片会因此掉帧。
+    if (!await dir.exists()) await dir.create(recursive: true);
     _cacheDir = dir;
     return dir;
   }
@@ -64,17 +96,24 @@ class ModIconCache {
       final dir = await _getCacheDir();
       final file = File(p.join(dir.path, _fileName(url)));
 
-      // 磁盘命中
-      if (file.existsSync()) {
-        final bytes = file.readAsBytesSync();
+      // 磁盘命中。注意这里必须用异步 IO：列表滚动时每个新出现的图标都会走到
+      // 这里，同步读盘会直接卡住 UI 线程。
+      if (await file.exists()) {
+        final bytes = await file.readAsBytes();
         _memory[url] = bytes;
         return bytes;
       }
 
-      // 下载
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode != 200) return null;
-      final bytes = response.bodyBytes;
+      // 下载（限流，避免一次滑动派出上百个并发请求）
+      await _acquireDownloadSlot();
+      final Uint8List bytes;
+      try {
+        final response = await http.get(Uri.parse(url));
+        if (response.statusCode != 200) return null;
+        bytes = response.bodyBytes;
+      } finally {
+        _releaseDownloadSlot();
+      }
 
       // 写入磁盘
       await file.writeAsBytes(bytes);
@@ -153,10 +192,25 @@ class _CachedModIconState extends State<CachedModIcon> {
       return _defaultFallback(context);
     }
 
+    // 按显示尺寸解码：Modrinth 的图标常见 256/512px，而这里只画 40px。
+    // 全尺寸解码 + 上传大纹理是列表滑动掉帧的常见来源，故按物理像素
+    // （逻辑尺寸 × devicePixelRatio）限制解码大小。
+    //
+    // 用 ResizeImagePolicy.fit 而不是 Image.memory 的 cacheWidth/cacheHeight：
+    // 后者同时给宽高会按 BoxFit.fill 拉伸（非正方形图标会变形），fit 策略则
+    // 在保留原图宽高比的前提下缩到目标框内，再交给 BoxFit.cover 裁剪。
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final decodeSize = (widget.size * dpr).round();
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
-      child: Image.memory(
-        _bytes!,
+      child: Image(
+        image: ResizeImage(
+          MemoryImage(_bytes!),
+          width: decodeSize,
+          height: decodeSize,
+          policy: ResizeImagePolicy.fit,
+        ),
         width: widget.size,
         height: widget.size,
         fit: BoxFit.cover,

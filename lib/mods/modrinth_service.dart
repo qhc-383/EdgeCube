@@ -238,6 +238,14 @@ class ModrinthService {
   /// 每页数量（与 PCL-CE 的 compPageSize 不同，移动端用较小值）。
   static const pageSize = 20;
 
+  /// 游戏版本标签的进程内缓存。
+  ///
+  /// 这份标签列表上千条（含 alpha/beta/snapshot），接口虽小但响应体不小；
+  /// 「模组下载」「插件下载」两个标签页各自持有 [ModDownloadPage] 实例，切换
+  /// 标签页时都会重新拉取并 jsonDecode 一次，白白在主 isolate 上做重复解码。
+  /// 一次会话内标签不会变，缓存起来即可。
+  static List<ModrinthGameVersion>? _gameVersionsCache;
+
   /// 搜索模组或插件。
   ///
   /// [query] 为空时返回按 [sort] 排序的浏览列表。
@@ -352,8 +360,14 @@ class ModrinthService {
         .toList();
   }
 
-  /// 获取游戏版本标签列表。
-  static Future<List<ModrinthGameVersion>> getGameVersions() async {
+  /// 获取游戏版本标签列表（一次会话内复用进程内缓存）。
+  ///
+  /// [forceRefresh] 用于需要拿到最新标签的场景；失败不写缓存，下次仍会重试。
+  static Future<List<ModrinthGameVersion>> getGameVersions({
+    bool forceRefresh = false,
+  }) async {
+    final cached = _gameVersionsCache;
+    if (!forceRefresh && cached != null) return cached;
     final uri = Uri.parse('$_baseUrl/tag/game_version');
     final response = await http
         .get(uri, headers: {'User-Agent': await CloudHeaders.userAgent})
@@ -362,9 +376,11 @@ class ModrinthService {
       throw Exception('HTTP ${response.statusCode}');
     }
     final json = jsonDecode(response.body) as List? ?? [];
-    return json
+    final versions = json
         .map((e) => ModrinthGameVersion.fromJson(e as Map<String, dynamic>))
         .toList();
+    _gameVersionsCache = versions;
+    return versions;
   }
 
   /// 按文件 SHA1 哈希批量检查更新。
@@ -446,6 +462,34 @@ class ModrinthService {
   static String _sha1Sync(String filePath) {
     final bytes = File(filePath).readAsBytesSync();
     return sha1.convert(bytes).toString();
+  }
+
+  /// 批量计算 SHA1：**整批文件交给同一个 isolate**，返回 {path: sha1}。
+  ///
+  /// 与 [computeSha1] 的区别同 [ModMetadataParser.parseAll]：逐个文件调用
+  /// `compute` 会为每个文件新建一个 isolate，模组多时主 isolate 被反复的
+  /// isolate 启动/销毁挤占，列表滑动因此掉帧。整批一次往返稳定得多。
+  ///
+  /// 单个文件读取失败时该路径映射为空串，调用方可据此跳过。
+  static Future<Map<String, String>> computeSha1Batch(
+    List<String> filePaths,
+  ) async {
+    if (filePaths.isEmpty) return const <String, String>{};
+    return compute(_sha1BatchSync, filePaths);
+  }
+
+  /// 在 isolate 中同步执行：逐个读取文件 → 计算 SHA1。
+  static Map<String, String> _sha1BatchSync(List<String> filePaths) {
+    final result = <String, String>{};
+    for (final path in filePaths) {
+      try {
+        final bytes = File(path).readAsBytesSync();
+        result[path] = sha1.convert(bytes).toString();
+      } catch (_) {
+        result[path] = '';
+      }
+    }
+    return result;
   }
 
   /// 下载文件到指定路径，[onProgress] 回调 (received, total)。
