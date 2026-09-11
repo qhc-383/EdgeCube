@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -11,7 +12,6 @@ import 'package:flutter/services.dart';
 import '../config/network_store.dart';
 import '../net/download_engine.dart';
 import 'cloud_headers.dart';
-import 'online_service.dart';
 
 class DownloadLink {
   const DownloadLink({
@@ -70,51 +70,15 @@ class AppUpdateInfo {
   );
 }
 
-class UpdateCheckResult {
-  const UpdateCheckResult({required this.stable, this.beta});
-
-  final AppUpdateInfo stable;
-  final AppUpdateInfo? beta;
-
-  factory UpdateCheckResult.fromJson(Map<String, dynamic> json) =>
-      UpdateCheckResult(
-        stable: AppUpdateInfo.fromJson(json['stable'] as Map<String, dynamic>),
-        beta: json['beta'] != null
-            ? AppUpdateInfo.fromJson(json['beta'] as Map<String, dynamic>)
-            : null,
-      );
-}
-
 class UpdateService {
   UpdateService._();
 
   static const _channel = MethodChannel('com.venti1112.edgecube/update');
 
-  static Future<UpdateCheckResult?> checkForUpdates() async {
-    try {
-      final urls = await NetworkStore.getUpdateCheckUrls();
-      final info = await PackageInfo.fromPlatform();
-      final headers = await CloudHeaders.base();
-      headers['X-App-Version'] = info.version;
-      headers['X-App-Build'] = info.buildNumber;
-
-      return OnlineService.fetchFirstValid<UpdateCheckResult>(urls, (
-        url,
-      ) async {
-        final response = await http
-            .get(Uri.parse(url), headers: headers)
-            .timeout(const Duration(seconds: 15));
-        if (response.statusCode != 200) {
-          throw Exception('HTTP ${response.statusCode}');
-        }
-        final body = utf8.decode(response.bodyBytes);
-        final json = jsonDecode(body) as Map<String, dynamic>;
-        return UpdateCheckResult.fromJson(json);
-      }, (result) => result.stable.version.isNotEmpty);
-    } catch (_) {
-      return null;
-    }
-  }
+  static const _githubRepoUrl =
+      'https://api.github.com/repos/venti1112/EdgeCube/releases';
+  static const _giteeRepoUrl =
+      'https://gitee.com/api/v5/repos/venti1112/EdgeCube/releases';
 
   static Future<int> getCurrentBuild() async {
     final info = await PackageInfo.fromPlatform();
@@ -125,24 +89,187 @@ class UpdateService {
     return channelInfo.build > currentBuild;
   }
 
-  /// 根据「获取测试版」设置和构建号选取最佳的更新通道。
-  /// 返回 null 表示无需更新。
-  static Future<AppUpdateInfo?> pickBestUpdate(UpdateCheckResult result) async {
+  static Future<AppUpdateInfo?> pickBestUpdate(AppUpdateInfo result) async {
     final currentBuild = await getCurrentBuild();
     final enableBeta = await NetworkStore.loadBetaUpdates();
 
-    AppUpdateInfo? best;
-    if (hasUpdate(result.stable, currentBuild)) {
-      best = result.stable;
-    }
-    if (enableBeta &&
-        result.beta != null &&
-        hasUpdate(result.beta!, currentBuild)) {
-      if (best == null || result.beta!.build > best.build) {
-        best = result.beta;
+    if (!enableBeta) {
+      final tag = result.version.toLowerCase();
+      if (tag.contains('beta') || tag.contains('alpha') || tag.contains('rc')) {
+        return null;
       }
     }
-    return best;
+
+    return hasUpdate(result, currentBuild) ? result : null;
+  }
+
+  /// 从 GitHub/Gitee 并行获取最新更新信息，哪个先返回有效结果就用哪个。
+  static Future<AppUpdateInfo?> checkForUpdates() async {
+    final completer = Completer<AppUpdateInfo?>();
+    var failures = 0;
+    const totalSources = 2;
+
+    try {
+      final info = await PackageInfo.fromPlatform();
+      final headers = await CloudHeaders.base();
+      headers['X-App-Version'] = info.version;
+      headers['X-App-Build'] = info.buildNumber;
+
+      Future<void> fetchFromSource(
+        String url,
+        Map<String, String> requestHeaders,
+        String sourceName,
+      ) async {
+        try {
+          final response = await http
+              .get(Uri.parse(url), headers: requestHeaders)
+              .timeout(const Duration(seconds: 15));
+          if (response.statusCode != 200) {
+            throw Exception('HTTP ${response.statusCode}');
+          }
+          final body = utf8.decode(response.bodyBytes);
+          final releases = jsonDecode(body) as List<dynamic>;
+          final result = _parseReleases(releases, sourceName);
+          if (result != null && !completer.isCompleted) {
+            completer.complete(result);
+          }
+        } catch (_) {
+          if (!completer.isCompleted) {
+            failures++;
+            if (failures == totalSources) {
+              completer.complete(null);
+            }
+          }
+        }
+      }
+
+      fetchFromSource(_githubRepoUrl, headers, 'GitHub');
+      fetchFromSource(_giteeRepoUrl, {}, 'Gitee');
+    } catch (_) {
+      if (!completer.isCompleted) {
+        completer.complete(null);
+      }
+    }
+
+    return completer.future;
+  }
+
+  /// 从 releases 列表解析出最新的有效更新信息。
+  static AppUpdateInfo? _parseReleases(
+    List<dynamic> releases,
+    String sourceName,
+  ) {
+    for (final release in releases) {
+      final info = _parseRelease(release as Map<String, dynamic>, sourceName);
+      if (info != null) return info;
+    }
+    return null;
+  }
+
+  /// 从单个 release 解析更新信息，无效时返回 null。
+  static AppUpdateInfo? _parseRelease(
+    Map<String, dynamic> release,
+    String sourceName,
+  ) {
+    final tagName = release['tag_name'] as String?;
+    if (tagName == null || tagName.isEmpty) return null;
+
+    final assets = release['assets'] as List<dynamic>?;
+    if (assets == null || assets.isEmpty) return null;
+
+    String? apkUrl;
+    String sha256Hash = '';
+    for (final asset in assets) {
+      final assetMap = asset as Map<String, dynamic>;
+      final downloadUrl = assetMap['browser_download_url'] as String?;
+      if (downloadUrl != null && downloadUrl.toLowerCase().endsWith('.apk')) {
+        apkUrl = downloadUrl;
+        final digest = assetMap['digest'] as String?;
+        if (digest != null && digest.startsWith('sha256:')) {
+          sha256Hash = digest.substring(7);
+        }
+        break;
+      }
+    }
+    if (apkUrl == null) return null;
+
+    final version = _parseVersionFromTag(tagName);
+    final build = _parseBuildFromTag(tagName);
+    if (version == null || build == null) return null;
+
+    final body = release['body'] as String? ?? '';
+
+    return _buildAppUpdateInfo(
+      version: version,
+      build: build,
+      sha256: sha256Hash,
+      releaseNotes: body,
+      primarySource: sourceName,
+      primaryUrl: apkUrl,
+    );
+  }
+
+  /// 从 tag_name 解析版本号（去掉 v 前缀）。
+  static String? _parseVersionFromTag(String tagName) {
+    if (tagName.isEmpty) return null;
+    var version = tagName;
+    if (version.toLowerCase().startsWith('v')) {
+      version = version.substring(1);
+    }
+    return version.isEmpty ? null : version;
+  }
+
+  /// 从 tag_name 解析 build 号（提取末尾数字）。
+  static int? _parseBuildFromTag(String tagName) {
+    final match = RegExp(r'(\d+)\s*$').firstMatch(tagName);
+    if (match == null) return null;
+    return int.tryParse(match.group(1)!);
+  }
+
+  /// 构造 AppUpdateInfo，包含两个下载源（Gitee 默认在前）。
+  static AppUpdateInfo _buildAppUpdateInfo({
+    required String version,
+    required int build,
+    required String sha256,
+    required String releaseNotes,
+    required String primarySource,
+    required String primaryUrl,
+  }) {
+    final giteeUrl =
+        'https://gitee.com/venti1112/EdgeCube/releases/download/$version/EdgeCube-$version.apk';
+    final githubUrl =
+        'https://github.com/venti1112/EdgeCube/releases/download/v$version/EdgeCube-v$version.apk';
+
+    final List<DownloadLink> downloadLinks;
+    if (primarySource == 'GitHub') {
+      downloadLinks = [
+        DownloadLink(name: 'Gitee', url: giteeUrl, type: 'direct', extra: ''),
+        DownloadLink(
+          name: 'GitHub',
+          url: primaryUrl,
+          type: 'direct',
+          extra: '',
+        ),
+      ];
+    } else {
+      downloadLinks = [
+        DownloadLink(
+          name: 'Gitee',
+          url: primaryUrl,
+          type: 'direct',
+          extra: '',
+        ),
+        DownloadLink(name: 'GitHub', url: githubUrl, type: 'direct', extra: ''),
+      ];
+    }
+
+    return AppUpdateInfo(
+      version: version,
+      build: build,
+      sha256: sha256,
+      releaseNotes: releaseNotes,
+      downloadLinks: downloadLinks,
+    );
   }
 
   /// 下载 APK（单源），委托全局下载引擎（分片并行 + 断点续传）。

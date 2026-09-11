@@ -36,10 +36,6 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
   bool _enableBetaUpdates = true;
   bool _betaLoaded = false;
 
-  String _updateCheckUrl = '';
-  bool _updateCheckLoaded = false;
-  bool _updateCheckIsCustom = false;
-
   String _ecpkgCatalogUrl = '';
   bool _ecpkgCatalogLoaded = false;
   bool _ecpkgCatalogIsCustom = false;
@@ -57,7 +53,6 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
     _load();
     _loadDns();
     _loadBetaUpdates();
-    _loadUpdateCheckUrl();
     _loadEcpkgCatalogUrl();
     _loadDownloadSettings();
   }
@@ -141,29 +136,6 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
   Future<void> _saveBetaUpdates(bool value) async {
     setState(() => _enableBetaUpdates = value);
     await NetworkStore.saveBetaUpdates(value);
-  }
-
-  // ── 更新检查地址 ──
-
-  Future<void> _loadUpdateCheckUrl() async {
-    final urls = await NetworkStore.loadUpdateCheckUrls();
-    if (!mounted) return;
-    setState(() {
-      _updateCheckIsCustom = urls.isNotEmpty;
-      _updateCheckUrl = urls.isNotEmpty
-          ? urls.first
-          : OnlineService.defaultUpdateCheckUrls.first;
-      _updateCheckLoaded = true;
-    });
-  }
-
-  Future<void> _saveUpdateCheckUrl(String? url) async {
-    if (url != null && url.isNotEmpty) {
-      await NetworkStore.saveUpdateCheckUrls([url]);
-    } else {
-      await NetworkStore.saveUpdateCheckUrls([]);
-    }
-    await _loadUpdateCheckUrl();
   }
 
   // ── 运行环境下载地址 ──
@@ -515,20 +487,6 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
           value: _enableBetaUpdates,
           enabled: _betaLoaded,
           onChanged: _saveBetaUpdates,
-        ),
-        _urlPreference(
-          icon: Icons.system_update_outlined,
-          title: context.tr('network.updateCheckUrl'),
-          loaded: _updateCheckLoaded,
-          isCustom: _updateCheckIsCustom,
-          value: _updateCheckUrl,
-          onClear: () => _saveUpdateCheckUrl(null),
-          onEdit: () => _editUrl(
-            title: context.tr('network.updateCheckUrl'),
-            hint: 'URL',
-            currentValue: _updateCheckUrl,
-            onSave: (v) => _saveUpdateCheckUrl(v),
-          ),
         ),
         _urlPreference(
           icon: Icons.download_outlined,

@@ -176,36 +176,6 @@ class NetworkStore {
     await ConfigStore.writeConfig(_fileName, configMap);
   }
 
-  // ── 更新检查地址 ─────────────────────────────────────────────
-
-  static const String _updateCheckUrlsKey = 'updateCheckUrls';
-
-  /// 读取自定义更新检查地址列表；未配置时返回空列表（使用默认值）。
-  static Future<List<String>> loadUpdateCheckUrls() async {
-    final configMap = await ConfigStore.readConfig(_fileName);
-    final list = configMap[_updateCheckUrlsKey] as List?;
-    if (list == null || list.isEmpty) return [];
-    return list.whereType<String>().where((u) => u.isNotEmpty).toList();
-  }
-
-  /// 设置更新检查地址列表；设为空列表则恢复默认。
-  static Future<void> saveUpdateCheckUrls(List<String> urls) async {
-    final configMap = await ConfigStore.readConfig(_fileName);
-    final filtered = urls.where((u) => u.isNotEmpty).toList();
-    if (filtered.isEmpty) {
-      configMap.remove(_updateCheckUrlsKey);
-    } else {
-      configMap[_updateCheckUrlsKey] = filtered;
-    }
-    await ConfigStore.writeConfig(_fileName, configMap);
-  }
-
-  /// 获取更新检查地址列表（含默认值回退）。
-  static Future<List<String>> getUpdateCheckUrls() async {
-    final custom = await loadUpdateCheckUrls();
-    return custom.isNotEmpty ? custom : OnlineService.defaultUpdateCheckUrls;
-  }
-
   // ── 运行环境下载地址 ──────────────────────────────────────────
 
   static const String _ecpkgCatalogUrlsKey = 'ecpkgCatalogUrls';
