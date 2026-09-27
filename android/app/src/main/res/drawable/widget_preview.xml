@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  小组件预览图（250×40dp，4:1），供只支持 previewImage 的启动器在小部件列表中展示。
+  按 widget_server 的实际胶囊样式绘制：深色圆角底 + 状态点 + 标题/副标题占位条 + 启动按钮。
+  与 4×1 卡片同比例，避免 1:1 应用图标被 centerCrop 裁成一条。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="250dp"
+    android:height="40dp"
+    android:viewportWidth="250"
+    android:viewportHeight="40">
+
+    <!-- 胶囊背景：与 drawable/widget_background 同色同圆角 -->
+    <path
+        android:fillColor="#E6303030"
+        android:pathData="M16,0 L234,0 A16,16 0 0 1 250,16 L250,24 A16,16 0 0 1 234,40 L16,40 A16,16 0 0 1 0,24 L0,16 A16,16 0 0 1 16,0 Z" />
+
+    <!-- 状态点：运行中（绿） -->
+    <path
+        android:fillColor="#FF4CAF50"
+        android:pathData="M14,20 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0 Z" />
+
+    <!-- 标题占位条 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M41,12 H105 A3,3 0 0 1 108,15 A3,3 0 0 1 105,18 H41 A3,3 0 0 1 38,15 A3,3 0 0 1 41,12 Z" />
+
+    <!-- 副标题占位条 -->
+    <path
+        android:fillColor="#CCFFFFFF"
+        android:pathData="M40.5,22 H135.5 A2.5,2.5 0 0 1 138,24.5 A2.5,2.5 0 0 1 135.5,27 H40.5 A2.5,2.5 0 0 1 38,24.5 A2.5,2.5 0 0 1 40.5,22 Z" />
+
+    <!-- 启动按钮底 -->
+    <path
+        android:fillColor="#33FFFFFF"
+        android:pathData="M204,20 a18,18 0 1,0 36,0 a18,18 0 1,0 -36,0 Z" />
+
+    <!-- 启动按钮图标（播放三角） -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M218,14 L230,20 L218,26 Z" />
+</vector>

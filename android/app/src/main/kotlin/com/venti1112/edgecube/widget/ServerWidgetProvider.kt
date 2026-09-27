@@ -32,9 +32,14 @@ class ServerWidgetProvider : AppWidgetProvider() {
     ) {
         // 一次构建 RemoteViews，应用到所有 ID（widget 资源都共享）。
         // ServerWidgetViews.build 已在 WidgetUpdater 中复用；委托给静态构建方法以保持单一路径。
+        // 构建期间的任何异常都不能抛出：onUpdate 在绑定瞬间触发，崩溃会让启动器
+        // 显示「小部件出现问题」并回滚刚放下的小组件。
         for (id in appWidgetIds) {
-            val views = ServerWidgetViews.build(context)
-            appWidgetManager.updateAppWidget(id, views)
+            try {
+                val views = ServerWidgetViews.build(context)
+                appWidgetManager.updateAppWidget(id, views)
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -43,14 +48,20 @@ class ServerWidgetProvider : AppWidgetProvider() {
         when (intent.action) {
             ACTION_START -> {
                 // 启动：异步进行；启动结果会经 ServerProcessManager 触发 requestUpdate。
-                val result = ServerProcessManager.getInstance(context).startFromWidgetSnapshot()
-                if (result != null) {
-                    // 启动失败，立即刷新一次以反映「已停止」真实状态。
-                    WidgetUpdater.requestUpdate(context)
+                try {
+                    val result = ServerProcessManager.getInstance(context).startFromWidgetSnapshot()
+                    if (result != null) {
+                        // 启动失败，立即刷新一次以反映「已停止」真实状态。
+                        WidgetUpdater.requestUpdate(context)
+                    }
+                } catch (_: Exception) {
                 }
             }
             ACTION_STOP -> {
-                ServerProcessManager.getInstance(context).stopFromWidget()
+                try {
+                    ServerProcessManager.getInstance(context).stopFromWidget()
+                } catch (_: Exception) {
+                }
                 // stop 异步；ServerProcessManager 退出后会 requestUpdate。
             }
             ACTION_OPEN -> {
