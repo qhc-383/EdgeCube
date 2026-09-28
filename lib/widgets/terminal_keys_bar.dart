@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_miuix/miuix.dart';
-import 'package:xterm/xterm.dart';
+import 'package:xterm2/xterm.dart';
 
 /// 终端扩展按键栏
 class TerminalKeysBar extends StatelessWidget {

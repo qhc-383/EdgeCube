@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_miuix/miuix.dart';
-import 'package:xterm/xterm.dart';
+import 'package:xterm2/xterm.dart';
 
 import '../config/terminal_store.dart';
 import '../i18n/locale_scope.dart';
-import 'patched_terminal_view.dart';
 
 /// 可缩放终端视图：在 [TerminalView] 外包一层双指捏合缩放。
 ///
@@ -107,15 +106,33 @@ class _ZoomableTerminalState extends State<ZoomableTerminal> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // 修补版 TerminalView：修复部分输入法（发 performAction 而非 '\n'）
-          // 无法回车执行命令的问题，见 patched_terminal_view.dart 文件头。
-          PatchedTerminalView(
-            widget.terminal,
-            theme: TerminalThemes.defaultTheme,
-            textStyle: TerminalStyle(fontSize: widget.fontSize),
-            padding: widget.padding,
-            // 不自动抢焦点（页面常驻 IndexedStack）；点击终端再唤起键盘。
-            autofocus: false,
+          // keyboardType 必须显式传 multiline：xterm2 的默认值仍是
+          // emailAddress，与内部 CustomTextEdit 的 inputAction: newline 是
+          // 非法组合，会退化成单行输入框 + IME_ACTION_NONE，各家输入法按回车
+          // 行为不一（部分输入法发 performAction(newline) 而不插 '\n'）。
+          // multiline 会带上 IME_FLAG_NO_ENTER_ACTION，输入法按回车插入 '\n'。
+          //
+          // 外层的 MediaQuery.removePadding 是从删掉的 patched_terminal_view.dart
+          // 抄回来的修补：MiuixScaffold 的 body 铺满整屏、MediaQuery.padding 未被
+          // 消费，而 xterm/xterm2 的 TerminalView 会把 MediaQuery.padding 当成
+          // **渲染视口内边距**（参与 _lineOffset 与 viewport 行数计算）。页面外层
+          // 已经用 padding.top 避开了顶栏，这里再吃一遍就会在文字顶部留出一段
+          // 「状态栏 + 顶栏」高度的空白。
+          MediaQuery.removePadding(
+            context: context,
+            removeTop: true,
+            removeBottom: true,
+            removeLeft: true,
+            removeRight: true,
+            child: TerminalView(
+              widget.terminal,
+              theme: TerminalThemes.defaultTheme,
+              textStyle: TerminalStyle(fontSize: widget.fontSize),
+              padding: widget.padding,
+              keyboardType: TextInputType.multiline,
+              // 不自动抢焦点（页面常驻 IndexedStack）；点击终端再唤起键盘。
+              autofocus: false,
+            ),
           ),
           // 捏合时的字号提示浮层；不拦截指针，结束后淡出。
           Positioned.fill(

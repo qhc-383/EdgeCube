@@ -54,3 +54,6 @@ app.*.map.json
 /subsidiary
 /docs
 /temp
+
+/rust/edgecube-pty/target/
+PLAN.md

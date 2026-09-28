@@ -7,7 +7,7 @@ import 'package:logging/logging.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:port_forwarder/port_forwarder.dart';
-import 'package:xterm/xterm.dart';
+import 'package:xterm2/xterm.dart';
 
 import 'allay_properties.dart';
 import 'ddns_service.dart';
@@ -23,6 +23,7 @@ import '../config/stun_store.dart';
 import '../config/terminal_store.dart';
 import '../net/network_address.dart';
 import '../stun/stun_tunnel_service.dart';
+import '../terminal/utf8_carry.dart';
 import '../tunnel/tunnel_service.dart';
 import 'runtime_service.dart';
 import '../widgets/terminal_keys_bar.dart';
@@ -210,12 +211,14 @@ class ServerController extends ChangeNotifier
     TunnelService? tunnel,
     DdnsService? ddns,
     StunTunnelService? stun,
+    // 事件流注入点（测试用）：不传则订阅真实 EventChannel。
+    Stream<ServerEvent>? events,
   }) : _service = service ?? ServerService(),
        _upnp = upnp ?? UpnpService(),
        _tunnel = tunnel ?? TunnelService(),
        _ddns = ddns ?? DdnsService(),
        _stun = stun ?? StunTunnelService.instance {
-    _sub = _service.events().listen(_onEvent);
+    _sub = (events ?? _service.events()).listen(_onEvent);
     _tunnelSub = _tunnel.events().listen(_onTunnelEvent);
     _stun.addListener(_onStunChanged);
     terminal.onOutput = _onTerminalOutput;
@@ -242,6 +245,22 @@ class ServerController extends ChangeNotifier
   );
 
   // —— PTY 原始字节 → UTF-8 解码（allowMalformed 避免非法字节中断）——
+
+  /// 跨帧 UTF-8 解码：PTY 切块可能落在多字节字符中间，回放分片更是与字符
+  /// 边界无关，按块 `utf8.decode` 会把中文拆成一堆 U+FFFD。
+  final Utf8Carry _utf8 = Utf8Carry();
+
+  /// 回放历史期间为 true：抑制 [_feedTerm] 里的逐块 prompt 重绘。
+  ///
+  /// 历史是分片到达的，每片都画一次 `> ` 会把提示符插进历史正文中间；
+  /// 回放整体结束（[ServerHistoryEndEvent]）时再画唯一的一次。
+  bool _replaying = false;
+
+  /// 最近一次发给 PTY 的窗口尺寸；回放结束时原样补发一次。
+  int _lastCols = 0;
+  int _lastRows = 0;
+  int _lastCellW = 0;
+  int _lastCellH = 0;
 
   /// 终端扩展按键栏的「粘滞修饰键」：点亮后只对下一次输入生效一次，随即自动复位
   /// （与 Termux 的 CTRL/ALT 行为一致）。仅在原始终端模式下用于变换软键盘按键。
@@ -964,11 +983,31 @@ class ServerController extends ChangeNotifier
     int pixelWidth,
     int pixelHeight,
   ) {
+    final cellW = width > 0 ? pixelWidth ~/ width : 0;
+    final cellH = height > 0 ? pixelHeight ~/ height : 0;
+    _lastCols = width;
+    _lastRows = height;
+    _lastCellW = cellW;
+    _lastCellH = cellH;
     _service.resize(
       cols: width,
       rows: height,
-      cellWidth: width > 0 ? pixelWidth ~/ width : 0,
-      cellHeight: height > 0 ? pixelHeight ~/ height : 0,
+      cellWidth: cellW,
+      cellHeight: cellH,
+    );
+  }
+
+  /// 回放结束后补发一次尺寸
+  ///
+  /// 回放可能发生在终端 widget 布局之前（引擎重建后第一次 onListen），
+  /// 这时还没有缓存过尺寸，只能等 onResize 自己来。
+  void _resendResize() {
+    if (_lastCols <= 0 || _lastRows <= 0) return;
+    _service.resize(
+      cols: _lastCols,
+      rows: _lastRows,
+      cellWidth: _lastCellW,
+      cellHeight: _lastCellH,
     );
   }
 
@@ -983,13 +1022,14 @@ class ServerController extends ChangeNotifier
   }
 
   /// 把 PTY 原始字节解码为 UTF-8 字符串并同步写入终端。
-  /// PTY 输出以短批次到达（通常一到数行），单次解码即可，多字节字符跨分片的概率极低
-  /// 且 allowMalformed 下也会产出 U+FFFD 不致丢数据。
+  /// 解码经 [Utf8Carry] 跨帧拼接，保证切成两半的多字节字符不会变成 U+FFFD。
   void _feedTerm(Uint8List bytes) {
-    final str = utf8.decode(bytes, allowMalformed: true);
+    final str = _utf8.decode(bytes);
     if (str.isNotEmpty) _writeTerm(str);
     // PTY 新输出到达后重绘 prompt，保证 `> ` 始终在最末行。
-    if (_lineMode) _redrawPrompt();
+    // 回放期间例外：历史是分片的，逐片重绘会把提示符插进历史正文中间，
+    // 由 ServerHistoryEndEvent 在回放收尾时统一画一次。
+    if (_lineMode && !_replaying) _redrawPrompt();
   }
 
   // ——————————————————————————————————————————————————————————
@@ -1151,6 +1191,7 @@ class ServerController extends ChangeNotifier
     _log.clear();
     _service.clearLog();
     // 清屏 + 清滚动回看 + 光标归位，让终端与日志缓冲同步清空。
+    _utf8.reset();
     _writeTerm('\x1b[3J\x1b[2J\x1b[H');
     if (_lineMode) _redrawPrompt();
     notifyListeners();
@@ -1204,6 +1245,20 @@ class ServerController extends ChangeNotifier
       case ServerTermEvent(:final bytes):
         // 原始终端字节：同步写入终端（不进解析），保证与后续 prompt 重绘顺序正确。
         _feedTerm(bytes);
+      case ServerHistoryBeginEvent():
+        // 回放开始：丢掉上一段攒下的半个字符，清屏（含滚动回看与光标归位），
+        // 让随后分片到达的 term 帧原样铺成完整历史画面。
+        _utf8.reset();
+        _replaying = true;
+        _writeTerm('\x1b[3J\x1b[2J\x1b[H');
+        notifyListeners();
+      case ServerHistoryEndEvent():
+        // 回放结束：`> ` 提示符是本地画的、不在 PTY 历史里，不重绘必丢；
+        // 再补发一次尺寸，使 PTY 与界面一致。
+        _replaying = false;
+        if (_lineMode) _redrawPrompt();
+        _resendResize();
+        notifyListeners();
       case ServerLogEvent(:final line):
         // 已去 ANSI 的纯文本行：进日志缓冲并解析，但不写终端
         //（终端内容已由对应的 term 字节呈现，避免重复）。

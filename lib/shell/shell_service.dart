@@ -111,23 +111,34 @@ class ShellService {
     return res?.cast<String, dynamic>() ?? const {};
   }
 
-  /// 原生事件流（原始终端字节 / 状态）。
-  Stream<ShellEvent> events() {
-    return _events.receiveBroadcastStream().map((dynamic e) {
-      final map = (e as Map).cast<String, dynamic>();
-      switch (map['type']) {
-        case 'term':
-          return ShellTermEvent((map['bytes'] as Uint8List?) ?? Uint8List(0));
-        case 'state':
-          return ShellStateEvent(
-            status: map['status'] as String?,
-            label: map['label'] as String?,
-            exitCode: map['exitCode'] as int?,
-          );
-        default:
-          return ShellTermEvent(Uint8List(0));
-      }
-    });
+  /// 原生事件流（回放边界 / 终端字节 / 状态）。
+  Stream<ShellEvent> events() =>
+      _events.receiveBroadcastStream().map(parseShellEvent);
+}
+
+/// 把原生通道送来的一条 map 翻成 [ShellEvent]。
+///
+/// 抽成顶层函数是为了能脱离 EventChannel 直接测（回放边界、状态快照的解析）。
+/// 未知类型吞成空的 term 事件：多一帧不该让整条流炸掉。
+ShellEvent parseShellEvent(dynamic e) {
+  final map = (e as Map).cast<String, dynamic>();
+  switch (map['type']) {
+    case 'term':
+      return ShellTermEvent((map['bytes'] as Uint8List?) ?? Uint8List(0));
+    case 'state':
+      return ShellStateEvent(
+        status: map['status'] as String?,
+        label: map['label'] as String?,
+        exitCode: map['exitCode'] as int?,
+      );
+    case 'historyBegin':
+      // 输出历史回放开始：Dart 先清屏，随后的 term 帧才是完整画面。
+      return const ShellHistoryBeginEvent();
+    case 'historyEnd':
+      // 回放结束：重绘本地画的提示符（行编辑模式）并回发一次尺寸。
+      return const ShellHistoryEndEvent();
+    default:
+      return ShellTermEvent(Uint8List(0));
   }
 }
 
@@ -141,6 +152,19 @@ class ShellTermEvent extends ShellEvent {
   const ShellTermEvent(this.bytes);
 
   final Uint8List bytes;
+}
+
+/// 输出历史回放开始。收到后应清屏，接着的 [ShellTermEvent] 即完整历史画面。
+class ShellHistoryBeginEvent extends ShellEvent {
+  const ShellHistoryBeginEvent();
+}
+
+/// 输出历史回放结束。
+///
+/// 提示符是 Dart 本地画的、不在 PTY 历史里，不重绘必丢；同时回发一次
+/// resize 使 PTY 尺寸与界面一致
+class ShellHistoryEndEvent extends ShellEvent {
+  const ShellHistoryEndEvent();
 }
 
 /// shell 进程状态变化。[status] 为 `null` 表示已退出；非空为 `running`。

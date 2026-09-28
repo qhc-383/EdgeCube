@@ -3,6 +3,7 @@ package com.venti1112.edgecube.channels
 import android.content.Context
 import com.venti1112.edgecube.shell.ShellCommandRunner
 import com.venti1112.edgecube.shell.ShellProcessManager
+import com.venti1112.edgecube.pty.PtyException
 import com.venti1112.edgecube.shell.ShellResolver
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
@@ -38,13 +39,18 @@ internal object ShellChannel {
                 "isRunning" -> result.success(shellManager.isRunning)
 
                 "start" -> {
-                    try {
-                        val cwd = call.argument<String>("cwd")
-                        val shellId = call.argument<String>("shellId")
+                    val cwd = call.argument<String>("cwd")
+                    val shellId = call.argument<String>("shellId")
+                    // 换 shell 时要等上一个进程退干净（最多 2s），放后台线程；
+                    // PtyException 的 pty_* 稳定码原样透传，别被笼统的
+                    // SHELL_START_FAILED 盖掉。
+                    ChannelIo.runAsync(
+                        result,
+                        "SHELL_START_FAILED",
+                        { e -> (e as? PtyException)?.code ?: "SHELL_START_FAILED" },
+                    ) {
                         shellManager.start(cwd, shellId)
-                        result.success(true)
-                    } catch (e: Exception) {
-                        result.error("SHELL_START_FAILED", e.message, null)
+                        true
                     }
                 }
 
@@ -73,14 +79,10 @@ internal object ShellChannel {
                     result.success(null)
                 }
 
-                "stop" -> {
-                    shellManager.stop()
-                    result.success(null)
-                }
+                "stop" -> pty(result, "SHELL_STOP_FAILED") { shellManager.stop() }
 
-                "forceStop" -> {
+                "forceStop" -> pty(result, "SHELL_FORCE_STOP_FAILED") {
                     shellManager.forceStop()
-                    result.success(null)
                 }
 
                 "clearLog" -> {
@@ -116,5 +118,23 @@ internal object ShellChannel {
                 }
             },
         )
+    }
+
+    /**
+     * 同步跑一段会抛 [PtyException] 的 PTY 调用，把稳定错误码透传回 Flutter。
+     *
+     * 不包的话 `IllegalStateException` 会被 Flutter 的 `IncomingMethodCallHandler`
+     * 兜成笼统的 `code = "error"` —— Dart 侧就再也分不出
+     * `pty_already_running` / `pty_not_running` 这些可分支的码。
+     */
+    private fun pty(result: MethodChannel.Result, fallback: String, block: () -> Unit) {
+        try {
+            block()
+            result.success(null)
+        } catch (e: PtyException) {
+            result.error(e.code, e.message, null)
+        } catch (e: RuntimeException) {
+            result.error(fallback, e.message, null)
+        }
     }
 }

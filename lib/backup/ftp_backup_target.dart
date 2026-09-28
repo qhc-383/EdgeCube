@@ -36,9 +36,9 @@ class FtpBackupTarget implements BackupTarget {
       user: username,
       pass: password,
       securityType: securityType,
+      // LIST 命令兼容性最好（MLSD 并非所有服务器都支持）。
+      listCommand: ListCommand.list,
     );
-    // LIST 命令兼容性最好（MLSD 并非所有服务器都支持）。
-    ftp.listCommand = ListCommand.list;
     final connected = await ftp.connect();
     if (!connected) {
       throw StateError('FTP 连接失败：$host:$port');

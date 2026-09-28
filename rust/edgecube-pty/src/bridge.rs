@@ -1,0 +1,529 @@
+//! JNI 桥：`com.venti1112.edgecube.pty.PtyBridge` 的 native 实现。
+//!
+//! 设计要点：
+//!
+//! * **不抛异常**。所有可能失败的调用返回一个 JSON envelope
+//!   `{"ok":true,…}` / `{"ok":false,"code":"pty_*","message":…}`，
+//!   由 Kotlin 翻译成 `PtyException`。JNI 里做 `throw` 要拿异常类 + 构造器、
+//!   抛完还得确认 pending exception，容易漏；而 `nativeInfo` 反正已经要返回 JSON。
+//! * handle 是不透明 `jlong`，指向 [`SESSIONS`] 里的 `Arc<Session>`。
+//!   会话**与进程解耦**：进程停了 handle 依然有效，历史与订阅者都还在。
+//! * [`FrameSink`] 的实现 [`JniSink`] 只调 `onFrame`，**不 post、不加锁** ——
+//!   搬到主线程是 Kotlin 的活，见 `frame.rs` 的契约说明。
+
+use std::collections::HashMap;
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+
+use jni::objects::{GlobalRef, JByteArray, JObject, JObjectArray, JString, JValueGen};
+use jni::sys::{JNI_TRUE, jboolean, jint, jlong, jstring};
+use jni::{AttachGuard, JNIEnv, JavaVM};
+
+use crate::frame::{FrameSink, OutFrame, SharedSink};
+use crate::lifecycle;
+use crate::run::SpawnSpec;
+use crate::session::{Phase, ProcessError, Session};
+
+// ---------------------------------------------------------------------------
+// JVM 句柄
+// ---------------------------------------------------------------------------
+
+/// [`JavaVM`] 只是指向进程内唯一虚拟机的指针，JNI 规范本身允许任意 native
+/// 线程 `AttachCurrentThread` 后并发使用它 —— 但 `jni` crate 没给它标
+/// `Send`/`Sync`。这里显式补上（与 `jni` 自己的 `InternalAttachGuard` 同理）。
+struct SyncVm(JavaVM);
+// SAFETY: 见上 —— 指针目标是 JVM 单例，语义上全局共享。
+unsafe impl Send for SyncVm {}
+unsafe impl Sync for SyncVm {}
+
+static JVM: OnceLock<SyncVm> = OnceLock::new();
+
+fn jvm() -> Option<&'static SyncVm> {
+    JVM.get()
+}
+
+/// `JNI_OnLoad`：`System.loadLibrary("edgecube_pty")` 时由 ART 调用，
+/// 早于任何 `native*` 方法，因此 [`JVM`] 一定已经就位。
+#[unsafe(no_mangle)]
+pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut c_void) -> jint {
+    let _ = JVM.set(SyncVm(vm));
+    jni::sys::JNI_VERSION_1_6
+}
+
+/// Rust 长驻线程（输出 / 等待线程）持有的「已 attach」凭证。
+///
+/// 线程起来时 attach 一次、线程结束时随 [`Drop`] detach，省掉 JNI 回调每帧
+/// attach/detach 一次的开销。
+///
+/// `attach_current_thread()` 本身是**嵌套安全**的：线程若已被 JVM attach，
+/// 返回的 guard 标了 `should_detach: false`，drop 时不会把别人挂的线程摘掉。
+/// 所以这里可以无条件调。
+pub struct JniThreadGuard {
+    _guard: Option<AttachGuard<'static>>,
+}
+
+impl JniThreadGuard {
+    pub fn acquire() -> Self {
+        let Some(vm) = jvm() else {
+            // 主机上跑 `cargo test` 时没有 JVM —— 直接退化成空守卫。
+            return Self { _guard: None };
+        };
+        Self {
+            _guard: vm.0.attach_current_thread().ok(),
+        }
+    }
+}
+
+/// 在当前线程的前提交给 [f] 一个 `&mut JNIEnv`。
+///
+/// 没有 JVM（主机测试）时返回 `None`。
+fn with_env<T>(f: impl FnOnce(&mut JNIEnv) -> T) -> Option<T> {
+    let vm = jvm()?;
+    let mut guard = vm.0.attach_current_thread().ok()?;
+    Some(f(&mut guard))
+}
+
+// ---------------------------------------------------------------------------
+// handle 注册表
+// ---------------------------------------------------------------------------
+
+static SESSIONS: LazyLock<Mutex<HashMap<i64, Arc<Session>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
+
+/// 取一个会话；handle 不存在（拼错 / 已 destroy）→ [`ProcessError::NotRunning`]。
+///
+/// 这个错误码是**故意**复用的：Kotlin 侧对「没在跑」与「句柄失效」的处置
+/// 完全一样（报错并让界面回到已停止态），分两个码反而要多写一条分支。
+fn session_of(handle: jlong) -> Result<Arc<Session>, ProcessError> {
+    SESSIONS
+        .lock()
+        .map_err(|_| ProcessError::Spawn("会话注册表锁损坏".into()))?
+        .get(&handle)
+        .cloned()
+        .ok_or(ProcessError::NotRunning)
+}
+
+// ---------------------------------------------------------------------------
+// 返回值
+// ---------------------------------------------------------------------------
+
+fn new_string_raw(s: &str) -> jstring {
+    with_env(|env| {
+        env.new_string(s)
+            .map(|v| v.into_raw())
+            .unwrap_or(std::ptr::null_mut())
+    })
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// 失败 envelope。
+fn err_envelope(code: &str, message: impl AsRef<str>) -> jstring {
+    let json = serde_json::json!({
+        "ok": false,
+        "code": code,
+        "message": message.as_ref(),
+    });
+    new_string_raw(&json.to_string())
+}
+
+/// 成功 envelope；`body` 会被塞进 `"ok": true` 后原样返回。
+fn ok_envelope(body: serde_json::Value) -> jstring {
+    let mut json = body;
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("ok".into(), serde_json::Value::Bool(true));
+    }
+    new_string_raw(&json.to_string())
+}
+
+/// 把 [`ProcessError`] 翻成 envelope —— `code` 就是 Rust 侧的稳定码，
+/// Kotlin 直接拿它当 MethodChannel 的 errorCode。
+fn error_envelope(e: ProcessError) -> jstring {
+    err_envelope(e.code(), e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// 字符串 / 数组辅助
+// ---------------------------------------------------------------------------
+
+fn jstr(env: &mut JNIEnv, s: &JString) -> Option<String> {
+    env.get_string(s).ok().map(String::from)
+}
+
+fn jstr_vec(env: &mut JNIEnv, arr: &JObjectArray) -> Option<Vec<String>> {
+    let n = env.get_array_length(arr).ok()?;
+    let mut out = Vec::with_capacity(n.max(0) as usize);
+    for i in 0..n {
+        let item = env.get_object_array_element(arr, i).ok()?;
+        out.push(jstr(env, &JString::from(item))?);
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// 订阅者
+// ---------------------------------------------------------------------------
+
+/// 帧 kind 编号；必须与 Kotlin `FrameListener.onFrame` 里的常量一致。
+const KIND_REPLAY_BEGIN: jint = 0;
+const KIND_DATA: jint = 1;
+const KIND_REPLAY_END: jint = 2;
+const KIND_CONTROL: jint = 3;
+
+/// 把一帧投给 Kotlin 的 `FrameListener.onFrame(kind, bytes, json)`。
+///
+/// **只调方法、不加任何锁、不 `post`** —— 搬到主线程是 Kotlin 的活。
+/// 见 `frame.rs::FrameSink` 的契约说明。
+struct JniSink {
+    vm: &'static SyncVm,
+    listener: GlobalRef,
+}
+
+impl JniSink {
+    fn deliver(&self, frame: &OutFrame) {
+        let (kind, data, json): (jint, Option<&[u8]>, Option<&str>) = match frame {
+            OutFrame::ReplayBegin => (KIND_REPLAY_BEGIN, None, None),
+            OutFrame::Data(bytes) => (KIND_DATA, Some(bytes), None),
+            OutFrame::ReplayEnd(state) => (KIND_REPLAY_END, None, Some(state)),
+            OutFrame::Control(state) => (KIND_CONTROL, None, Some(state)),
+        };
+
+        // 任何一步失败（引擎被回收、OOM、抛了 Java 异常…）都只丢这一帧，
+        // 绝不让错误冒泡进 `fan_out` —— 那会连带搞死 PTY 读线程。
+        let mut guard = match self.vm.0.attach_current_thread() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let env: &mut JNIEnv = &mut guard;
+
+        let bytes_obj: Option<JObject> = match data {
+            Some(d) => match env.byte_array_from_slice(d) {
+                Ok(arr) => Some(JObject::from(arr)),
+                Err(_) => return,
+            },
+            None => None,
+        };
+        let json_obj: Option<JObject> = match json {
+            Some(j) => match env.new_string(j) {
+                Ok(s) => Some(JObject::from(s)),
+                Err(_) => return,
+            },
+            None => None,
+        };
+        let null = JObject::null();
+        let args = [
+            JValueGen::Int(kind),
+            JValueGen::Object(bytes_obj.as_ref().unwrap_or(&null)),
+            JValueGen::Object(json_obj.as_ref().unwrap_or(&null)),
+        ];
+
+        let _ = env.call_method(&self.listener, "onFrame", "(I[BLjava/lang/String;)V", &args);
+        // 调用抛了 Java 异常时必须清掉 pending 状态，否则下一次 JNI 调用
+        //（哪怕与该异常毫无关系）会直接 abort。
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+        }
+    }
+}
+
+impl FrameSink for JniSink {
+    fn send(&self, frame: OutFrame) {
+        self.deliver(&frame);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 会话
+// ---------------------------------------------------------------------------
+
+/// 建一个会话；返回 handle（0 表示注册表锁损坏）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeCreate<'local>(
+    mut env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    label: JString<'local>,
+) -> jlong {
+    let label = jstr(&mut env, &label).unwrap_or_else(|| "pty".into());
+    let session = Arc::new(Session::new(label));
+    let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    match SESSIONS.lock() {
+        Ok(mut map) => {
+            map.insert(handle, session);
+            handle
+        }
+        Err(_) => 0,
+    }
+}
+
+/// 销毁会话：先静默收掉进程，再丢掉历史与订阅者。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeDestroy(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) {
+    if let Ok(mut map) = SESSIONS.lock()
+        && let Some(session) = map.remove(&handle)
+    {
+        lifecycle::shutdown_quiet(&session);
+    }
+}
+
+/// 拉起一轮进程。
+///
+/// `initial_phase` 取 `"running"`（shell）/ `"starting"`（服务端）/ `"preparing"`。
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeStart<'local>(
+    mut env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+    argv: JObjectArray<'local>,
+    envp: JObjectArray<'local>,
+    cwd: JString<'local>,
+    rows: jint,
+    cols: jint,
+    cell_w: jint,
+    cell_h: jint,
+    initial_phase: JString<'local>,
+    auto_restart: jboolean,
+) -> jstring {
+    let session = match session_of(handle) {
+        Ok(s) => s,
+        Err(e) => return error_envelope(e),
+    };
+    let (Some(argv), Some(envp)) = (jstr_vec(&mut env, &argv), jstr_vec(&mut env, &envp)) else {
+        return err_envelope("pty_start_failed", "argv / envp 解析失败");
+    };
+    let cwd = jstr(&mut env, &cwd).unwrap_or_default();
+    let phase = match jstr(&mut env, &initial_phase).as_deref() {
+        Some("starting") => Phase::Starting,
+        Some("preparing") => Phase::Preparing,
+        _ => Phase::Running,
+    };
+    let u = |v: jint| v.clamp(1, u16::MAX as jint) as u16;
+
+    let spec = SpawnSpec {
+        label: session.label.clone(),
+        argv,
+        cwd,
+        envp,
+        rows: u(rows),
+        cols: u(cols),
+        cell_w: u(cell_w),
+        cell_h: u(cell_h),
+        initial_phase: phase,
+        auto_restart: auto_restart == JNI_TRUE,
+    };
+
+    match lifecycle::start(&session, spec) {
+        Ok(info) => ok_envelope(serde_json::json!({ "info": info.to_json() })),
+        Err(e) => error_envelope(e),
+    }
+}
+
+/// 优雅停止：把停止命令写进 PTY（支持 `^C` 这类 caret 记号）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeStop<'local>(
+    mut env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+    stop_command: JString<'local>,
+    line_ending: JString<'local>,
+) -> jstring {
+    let cmd = jstr(&mut env, &stop_command).unwrap_or_default();
+    let ending = jstr(&mut env, &line_ending).unwrap_or_else(|| "\n".into());
+    match session_of(handle) {
+        Ok(session) => match lifecycle::stop(&session, &cmd, &ending) {
+            Ok(()) => ok_envelope(serde_json::json!({})),
+            Err(e) => error_envelope(e),
+        },
+        Err(e) => error_envelope(e),
+    }
+}
+
+/// 强制停止：整组 SIGKILL（**先 killpg 再 killer**，见 `lifecycle.rs`）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeKill(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jstring {
+    match session_of(handle) {
+        Ok(session) => match lifecycle::kill(&session) {
+            Ok(()) => ok_envelope(serde_json::json!({})),
+            Err(e) => error_envelope(e),
+        },
+        Err(e) => error_envelope(e),
+    }
+}
+
+/// 前端匹配到就绪标记后调：`starting` → `running`。
+///
+/// Rust 不读输出流里那个标记（`DONE_PATTERN` 在 Kotlin 的行组装里），
+/// 所以状态推进必须由 Kotlin 显式点一下。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeNotifyReady(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) {
+    if let Ok(session) = session_of(handle) {
+        lifecycle::notify_ready(&session);
+    }
+}
+
+/// 静默收掉进程（不改阶段、不发通知）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeShutdownQuiet(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) {
+    if let Ok(session) = session_of(handle) {
+        lifecycle::shutdown_quiet(&session);
+    }
+}
+
+/// 往 PTY 写原始字节。`0` = 成功，`1` = 没有在跑的进程。
+///
+/// 热路径（每个按键都会走），所以返回 int 而不是 JSON；
+/// 且 [`Session::write`] 走无界通道，**永不阻塞主线程**（修缺陷 A6）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeWrite<'local>(
+    env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+    bytes: JByteArray<'local>,
+) -> jint {
+    let Ok(session) = session_of(handle) else {
+        return 1;
+    };
+    let data = match env.convert_byte_array(&bytes) {
+        Ok(d) => d,
+        Err(_) => return 1,
+    };
+    session.write(data).map(|_| 0).unwrap_or(1)
+}
+
+/// 调窗口尺寸。`0` = 成功，`1` = 没有在跑的进程。
+///
+/// 异步交给输入线程执行，因此这里同样不阻塞（修缺陷 A6）。
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeResize(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    rows: jint,
+    cols: jint,
+    cell_w: jint,
+    cell_h: jint,
+) -> jint {
+    let Ok(session) = session_of(handle) else {
+        return 1;
+    };
+    if rows <= 0 || cols <= 0 {
+        return 0;
+    }
+    let u = |v: jint| v.clamp(1, u16::MAX as jint) as u16;
+    session
+        .resize(u(cols), u(rows), u(cell_w), u(cell_h))
+        .map(|_| 0)
+        .unwrap_or(1)
+}
+
+/// 开关回显。`0` = 成功，`1` = 没有在跑的进程。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeSetEcho(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    echo: jboolean,
+) -> jint {
+    let Ok(session) = session_of(handle) else {
+        return 1;
+    };
+    session.set_echo(echo == JNI_TRUE).map(|_| 0).unwrap_or(1)
+}
+
+/// 订阅输出；返回 sub id（0 = 句柄 / listener 无效）。
+///
+/// `withHistory` 为真时，在 broadcast 锁内同步把 `ReplayBegin / 分片 / ReplayEnd`
+/// 全部投给 `listener`，**投完才注册**。见 `broadcast.rs::subscribe`。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeSubscribe<'local>(
+    env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+    listener: JObject<'local>,
+    with_history: jboolean,
+) -> jlong {
+    let (Ok(session), Some(vm)) = (session_of(handle), jvm()) else {
+        return 0;
+    };
+    let Ok(global) = env.new_global_ref(&listener) else {
+        return 0;
+    };
+    let sink: SharedSink = Arc::new(JniSink {
+        vm,
+        listener: global,
+    });
+    session.subscribe(sink, with_history == JNI_TRUE) as jlong
+}
+
+/// 退订；**不影响进程**（断开连接 ≠ 停服务）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeUnsubscribe(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    sub_id: jlong,
+) {
+    if let Ok(session) = session_of(handle) {
+        session.unsubscribe(sub_id as u64);
+    }
+}
+
+/// 清输出历史（与界面清屏同步）；**保留订阅者**。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeClearHistory(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) {
+    if let Ok(session) = session_of(handle) {
+        session.clear_history();
+    }
+}
+
+/// 往控制台写一条 EdgeCube 自己的提示。
+///
+/// 进历史 → 经 sink 同时出现在 `term`（画面）与 `log`（行组装在 sink 回调里跑）
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeNotice<'local>(
+    mut env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+    text: JString<'local>,
+) {
+    if let Ok(session) = session_of(handle)
+        && let Some(text) = jstr(&mut env, &text)
+    {
+        session.notice(&text);
+    }
+}
+
+/// 当前状态 JSON（`RunInfo` 的 state 载荷）；句柄无效时返回 `"{}"`。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_venti1112_edgecube_pty_PtyBridge_nativeInfo(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jstring {
+    match session_of(handle) {
+        Ok(session) => new_string_raw(&session.info().state_json()),
+        Err(_) => new_string_raw("{}"),
+    }
+}

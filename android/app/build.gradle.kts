@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.gradle.api.GradleException
 
 plugins {
     id("com.android.application")
@@ -11,15 +12,76 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(keystorePropertiesFile.inputStream())
 }
 
+// ─── Rust：libedgecube_pty.so（portable-pty PTY 桥）──────────────────────────
+
+val dartRoot = rootProject.projectDir.parentFile
+val rustCrateDir = dartRoot.resolve("rust/edgecube-pty")
+
+// 目标 ABI 需与 `rustup target list --installed` 一致（无 i686，故不含 x86）。
+val rustAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+// cargo-ndk -o 输出 jniLibs 目录结构：<dir>/<abi>/libedgecube_pty.so
+val rustJniLibs = rootProject.layout.buildDirectory.dir("rust/jniLibs").get().asFile
+
+val cargoBuild = tasks.register<Exec>("cargoBuild") {
+    group = "build"
+    description = "交叉编译 libedgecube_pty.so（${rustAbis.joinToString()}）到 build/rust/jniLibs"
+
+    inputs.files(
+        fileTree(rustCrateDir) {
+            include("Cargo.toml", "Cargo.lock", "src/**/*.rs", "tests/**/*.rs")
+        },
+    )
+    outputs.dir(rustJniLibs)
+
+    val outDir = rustJniLibs
+    val args = buildList {
+        addAll(listOf("cargo", "ndk"))
+        rustAbis.forEach { addAll(listOf("-t", it)) }
+        addAll(
+            listOf(
+                "-P", "24",
+                "-o", outDir.absolutePath,
+                "build", "--release",
+                "--manifest-path", rustCrateDir.resolve("Cargo.toml").absolutePath,
+            ),
+        )
+    }
+    commandLine(args)
+    workingDir = rustCrateDir
+
+    doFirst {
+        outDir.mkdirs()
+        val probe = ProcessBuilder("cargo", "--version")
+            .redirectErrorStream(true)
+            .start()
+        if (probe.waitFor() != 0) {
+            throw GradleException(
+                """
+                找不到 cargo，无法构建 PTY JNI 库（libedgecube_pty.so）。
+                请先安装 Rust 与 cargo-ndk：
+                  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+                  cargo install cargo-ndk
+                并确认 Android NDK 已安装（local.properties 的 sdk.dir / ndkVersion=${android.ndkVersion}）。
+                """.trimIndent(),
+            )
+        }
+        val ndk = android.ndkDirectory
+        if (!ndk.isDirectory) {
+            throw GradleException("Android NDK 未就位：${ndk}（安装 NDK ${android.ndkVersion} 后重试）")
+        }
+        environment("ANDROID_NDK_HOME", ndk.absolutePath)
+    }
+}
+
 android {
     namespace = "com.venti1112.edgecube"
     compileSdk {
         version = release(37) {
-            minorApiLevel = 1
+            minorApiLevel = 2
         }
     }
     buildToolsVersion = "37.0.0"
-    ndkVersion = "30.0.15729638"
+    ndkVersion = "30.0.16248370"
 
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
@@ -80,12 +142,19 @@ android {
                 "META-INF/DEPENDENCIES",
                 "META-INF/LICENSE",
                 "META-INF/LICENSE.txt",
+                "META-INF/LICENSE.md",
                 "META-INF/NOTICE",
                 "META-INF/NOTICE.txt",
                 "META-INF/*.kotlin_module",
                 "**/*.dll",
                 "**/*.dylib",
             )
+        }
+    }
+
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDir(rustJniLibs)
         }
     }
 }
@@ -100,19 +169,25 @@ flutter {
     source = "../.."
 }
 
+// AGP 在 afterEvaluate 之后才把 preBuild 之类的任务登记进来，
+// 用 matching+configureEach 而不是 named：后者在登记前调用会直接抛。
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn(cargoBuild)
+}
+
 dependencies {
     implementation("org.apache.commons:commons-compress:1.28.0")
     implementation("org.tukaani:xz:1.12")
-    implementation("com.github.luben:zstd-jni:1.5.7-11")
-    implementation("commons-codec:commons-codec:1.22.0")
-    implementation("org.slf4j:slf4j-api:2.0.18")
-    implementation("org.slf4j:slf4j-jdk14:2.0.18")
-    implementation("com.github.junrar:junrar:7.6.0")
+    implementation("com.github.luben:zstd-jni:1.5.7-20")
+    implementation("commons-codec:commons-codec:1.22.1")
+    implementation("org.slf4j:slf4j-api:2.0.20")
+    implementation("org.slf4j:slf4j-jdk14:2.0.20")
+    implementation("com.github.junrar:junrar:8.1.1")
     implementation("org.apache.ftpserver:ftpserver-core:1.2.1")
-    implementation("org.apache.sshd:sshd-core:3.0.0-M4")
-    implementation("org.apache.sshd:sshd-sftp:3.0.0-M4")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.84")
-    implementation("org.bouncycastle:bcpkix-jdk18on:1.84")
+    implementation("org.apache.sshd:sshd-core:3.0.0-M5")
+    implementation("org.apache.sshd:sshd-sftp:3.0.0-M5")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.86")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.86")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     implementation("androidx.core:core-ktx:1.19.0")
 }

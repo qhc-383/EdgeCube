@@ -2,10 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
-import 'package:xterm/xterm.dart';
+import 'package:xterm2/xterm.dart';
 
 import '../i18n/i18n_service.dart';
 import 'shell_service.dart';
+import '../terminal/utf8_carry.dart';
 import '../widgets/terminal_keys_bar.dart';
 
 /// 交互式 shell 终端的全局控制器。
@@ -14,9 +15,12 @@ import '../widgets/terminal_keys_bar.dart';
 /// 喂给终端渲染。与 [ServerController] 不同，shell 在真实 TTY 上自带行编辑/历史/补全，
 /// 因此这里**只有原始模式**：不做本地行编辑，仅转发字节并应用粘滞 CTRL/ALT 修饰键。
 class ShellController extends ChangeNotifier implements TerminalKeysController {
-  ShellController({ShellService? service})
-    : _service = service ?? ShellService() {
-    _sub = _service.events().listen(_onEvent);
+  ShellController({
+    ShellService? service,
+    // 事件流注入点（测试用）：不传则订阅真实 EventChannel。
+    Stream<ShellEvent>? events,
+  }) : _service = service ?? ShellService() {
+    _sub = (events ?? _service.events()).listen(_onEvent);
     terminal.onOutput = _onTerminalOutput;
     terminal.onResize = _onTerminalResize;
   }
@@ -34,6 +38,15 @@ class ShellController extends ChangeNotifier implements TerminalKeysController {
   bool _running = false;
   String? _label;
   int? _lastExitCode;
+
+  /// 跨帧 UTF-8 解码（PTY 切块可能落在多字节字符中间）。
+  final Utf8Carry _utf8 = Utf8Carry();
+
+  /// 最近一次发给 PTY 的窗口尺寸；回放结束时原样补发一次。
+  int _lastCols = 0;
+  int _lastRows = 0;
+  int _lastCellW = 0;
+  int _lastCellH = 0;
 
   bool get isRunning => _running;
 
@@ -94,6 +107,7 @@ class ShellController extends ChangeNotifier implements TerminalKeysController {
   void clear() {
     _service.clearLog();
     // 清屏 + 清滚动回看 + 光标归位。
+    _utf8.reset();
     _writeTerm('\x1b[3J\x1b[2J\x1b[H');
     notifyListeners();
   }
@@ -162,11 +176,31 @@ class ShellController extends ChangeNotifier implements TerminalKeysController {
     int pixelWidth,
     int pixelHeight,
   ) {
+    final cellW = width > 0 ? pixelWidth ~/ width : 0;
+    final cellH = height > 0 ? pixelHeight ~/ height : 0;
+    _lastCols = width;
+    _lastRows = height;
+    _lastCellW = cellW;
+    _lastCellH = cellH;
     _service.resize(
       cols: width,
       rows: height,
-      cellWidth: width > 0 ? pixelWidth ~/ width : 0,
-      cellHeight: height > 0 ? pixelHeight ~/ height : 0,
+      cellWidth: cellW,
+      cellHeight: cellH,
+    );
+  }
+
+  /// 回放结束后补发一次尺寸。
+  ///
+  /// 回放可能发生在终端 widget 布局之前（引擎重建后第一次 onListen），
+  /// 这时还没有缓存过尺寸，只能等 onResize 自己来。
+  void _resendResize() {
+    if (_lastCols <= 0 || _lastRows <= 0) return;
+    _service.resize(
+      cols: _lastCols,
+      rows: _lastRows,
+      cellWidth: _lastCellW,
+      cellHeight: _lastCellH,
     );
   }
 
@@ -177,8 +211,17 @@ class ShellController extends ChangeNotifier implements TerminalKeysController {
   void _onEvent(ShellEvent event) {
     switch (event) {
       case ShellTermEvent(:final bytes):
-        final str = utf8.decode(bytes, allowMalformed: true);
+        final str = _utf8.decode(bytes);
         if (str.isNotEmpty) terminal.write(str);
+      case ShellHistoryBeginEvent():
+        // 回放开始：先丢掉上一段攒下的半个字符，再清屏，
+        // 让随后的 term 帧原样铺成完整历史画面（否则旧内容叠在新回放上）。
+        _utf8.reset();
+        _writeTerm('\x1b[3J\x1b[2J\x1b[H');
+      case ShellHistoryEndEvent():
+        // shell 在真实 TTY 上自己画提示符，历史里就有，这里只需补发尺寸。
+        _resendResize();
+        notifyListeners();
       case ShellStateEvent(:final status, :final label, :final exitCode):
         _running = status != null;
         if (exitCode != null) _lastExitCode = exitCode;

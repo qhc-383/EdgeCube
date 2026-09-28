@@ -105,26 +105,37 @@ class ServerService {
   /// 清空原生侧日志缓冲（与界面清屏同步，避免重连后又被回放）。
   Future<void> clearLog() => _method.invokeMethod('clearLog');
 
-  /// 原生事件流（日志 / 状态）。
-  Stream<ServerEvent> events() {
-    return _events.receiveBroadcastStream().map((dynamic e) {
-      final map = (e as Map).cast<String, dynamic>();
-      switch (map['type']) {
-        case 'log':
-          return ServerLogEvent(map['line'] as String? ?? '');
-        case 'term':
-          return ServerTermEvent((map['bytes'] as Uint8List?) ?? Uint8List(0));
-        case 'state':
-          return ServerStateEvent(
-            status: map['status'] as String?,
-            instanceId: map['instanceId'] as String?,
-            instanceName: map['instanceName'] as String?,
-            exitCode: map['exitCode'] as int?,
-          );
-        default:
-          return ServerLogEvent(e.toString());
-      }
-    });
+  /// 原生事件流（回放边界 / 终端字节 / 日志 / 状态）。
+  Stream<ServerEvent> events() =>
+      _events.receiveBroadcastStream().map(parseServerEvent);
+}
+
+/// 把原生通道送来的一条 map 翻成 [ServerEvent]。
+///
+/// 抽成顶层函数是为了能脱离 EventChannel 直接测（回放边界、状态快照的解析，
+/// 以及 `historyBegin → term… → state → historyEnd` 的顺序）。
+ServerEvent parseServerEvent(dynamic e) {
+  final map = (e as Map).cast<String, dynamic>();
+  switch (map['type']) {
+    case 'log':
+      return ServerLogEvent(map['line'] as String? ?? '');
+    case 'term':
+      return ServerTermEvent((map['bytes'] as Uint8List?) ?? Uint8List(0));
+    case 'state':
+      return ServerStateEvent(
+        status: map['status'] as String?,
+        instanceId: map['instanceId'] as String?,
+        instanceName: map['instanceName'] as String?,
+        exitCode: map['exitCode'] as int?,
+      );
+    case 'historyBegin':
+      // 输出历史回放开始：Dart 先清屏，随后的 term 帧才是完整画面。
+      return const ServerHistoryBeginEvent();
+    case 'historyEnd':
+      // 回放结束：重绘本地画的命令行提示符并回发一次尺寸。
+      return const ServerHistoryEndEvent();
+    default:
+      return ServerLogEvent(e.toString());
   }
 }
 
@@ -145,6 +156,19 @@ class ServerTermEvent extends ServerEvent {
   const ServerTermEvent(this.bytes);
 
   final Uint8List bytes;
+}
+
+/// 输出历史回放开始。收到后应清屏，接着的 [ServerTermEvent] 即完整历史画面。
+class ServerHistoryBeginEvent extends ServerEvent {
+  const ServerHistoryBeginEvent();
+}
+
+/// 输出历史回放结束。
+///
+/// 命令行提示符是 Dart 本地画的、不在 PTY 历史里，不重绘必丢；同时回发一次
+/// resize 使 PTY 尺寸与界面一致
+class ServerHistoryEndEvent extends ServerEvent {
+  const ServerHistoryEndEvent();
 }
 
 /// 进程状态变化（也用于界面重连时的状态回放）。

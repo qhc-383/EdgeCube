@@ -1,6 +1,7 @@
 package com.venti1112.edgecube.channels
 
 import android.content.Context
+import com.venti1112.edgecube.pty.PtyException
 import com.venti1112.edgecube.server.RuntimeInstaller
 import com.venti1112.edgecube.server.ServerProcessManager
 import io.flutter.plugin.common.BinaryMessenger
@@ -54,7 +55,13 @@ internal object ServerChannel {
                     } else {
                         val instanceName = call.argument<String>("instanceName") ?: instanceId
                         // 含解压，放后台线程；完成后回主线程返回结果。
-                        ChannelIo.runAsync(result, "START_FAILED") {
+                        // PtyException 的 pty_* 稳定码原样透传（已有服务端在跑 →
+                        // pty_already_running 等），别被笼统的 START_FAILED 盖掉。
+                        ChannelIo.runAsync(
+                            result,
+                            "START_FAILED",
+                            { e -> (e as? PtyException)?.code ?: "START_FAILED" },
+                        ) {
                             serverManager.start(
                                 instanceId, instanceName, workingDir, runtimeId,
                                 runtime, runtimeArgs, programArgs, directExecute, lineEnding,
@@ -90,14 +97,10 @@ internal object ServerChannel {
                     result.success(null)
                 }
 
-                "stop" -> {
-                    serverManager.stop()
-                    result.success(null)
-                }
+                "stop" -> pty(result, "STOP_FAILED") { serverManager.stop() }
 
-                "forceStop" -> {
+                "forceStop" -> pty(result, "FORCE_STOP_FAILED") {
                     serverManager.forceStop()
-                    result.success(null)
                 }
 
                 "clearLog" -> {
@@ -120,5 +123,23 @@ internal object ServerChannel {
                 }
             },
         )
+    }
+
+    /**
+     * 同步跑一段会抛 [PtyException] 的 PTY 调用，把稳定错误码透传回 Flutter。
+     *
+     * 不包的话 `IllegalStateException` 会被 Flutter 的 `IncomingMethodCallHandler`
+     * 兜成笼统的 `code = "error"` —— Dart 侧就再也分不出
+     * `pty_not_running` / `pty_stop_command_missing` 这些可分支的码。
+     */
+    private fun pty(result: MethodChannel.Result, fallback: String, block: () -> Unit) {
+        try {
+            block()
+            result.success(null)
+        } catch (e: PtyException) {
+            result.error(e.code, e.message, null)
+        } catch (e: RuntimeException) {
+            result.error(fallback, e.message, null)
+        }
     }
 }

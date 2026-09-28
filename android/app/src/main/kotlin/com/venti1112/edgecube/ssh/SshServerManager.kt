@@ -31,7 +31,7 @@ import java.security.Security
 /**
  * SSH 服务器管理器：在 Android 原生侧运行一个 SSH 服务，同时提供
  *  - SFTP 子系统（安全文件传输，根目录锁定为指定 rootDir）；
- *  - SSH 终端（交互式 shell，桥接到自带 PTY，见 [EcPtyInvertedShell]）。
+ *  - SSH 终端（交互式 shell，桥接到自带 PTY，见 [PtyInvertedShell]）。
  *
  * 基于 Apache MINA SSHD（纯 Java），单例。SFTP 与 SSH 终端共用同一端口、同一主机密钥与
  * 同一套账号；两者各由开关独立启停（至少启用其一才会启动）。与 FTP（Apache FTPServer）
@@ -120,7 +120,7 @@ object SshServerManager {
             val appContext = context.applicationContext
             val rootPath = root.absolutePath
             sshd.shellFactory = ShellFactory {
-                InvertedShellWrapper(EcPtyInvertedShell(appContext, rootPath))
+                InvertedShellWrapper(PtyInvertedShell(appContext, rootPath))
             }
         }
         // 不提供 exec/command 通道（仅交互式 shell 与 SFTP）。

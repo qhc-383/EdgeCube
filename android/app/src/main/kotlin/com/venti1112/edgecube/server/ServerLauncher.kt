@@ -9,7 +9,7 @@ import java.io.File
 import java.util.TimeZone
 
 /**
- * 服务端启动命令构造：把「实例配置」翻译成可直接交给 [EcPty] 的
+ * 服务端启动命令构造：把「实例配置」翻译成可直接交给 [com.venti1112.edgecube.pty.PtySession.start] 的
  * cmd/argv/env 三元组。按 [build] 的 runtime 参数分派：
  *
  *  - java ：执行 nativeLibraryDir 下的 liblaunch.so，由它 dlopen JRE 的
@@ -53,7 +53,7 @@ recursionguard.enabled=0"""
         /** 是否为 proot 模式（顶层进程是 proot，实际服务端在其子进程中）。 */
         val isProot: Boolean,
     ) {
-        /** 转为 [EcPty.createSubprocess] 需要的 "KEY=VALUE" 数组。 */
+        /** 转为 PTY 启动所需的 "KEY=VALUE" 数组。 */
         fun envp(): Array<String> = env.map { "${it.key}=${it.value}" }.toTypedArray()
     }
 

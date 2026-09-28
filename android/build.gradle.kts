@@ -1,7 +1,5 @@
 allprojects {
     repositories {
-        maven { url = uri("https://maven.aliyun.com/repository/google") }
-        maven { url = uri("https://maven.aliyun.com/repository/public") }
         google()
         mavenCentral()
     }
@@ -31,7 +29,7 @@ gradle.beforeProject {
             }
             if (field != null) {
                 field.isAccessible = true
-                field.set(flutterExt, "30.0.15729638")
+                field.set(flutterExt, "30.0.16248370")
             }
         } catch (e: Exception) {
             logger.warn("无法反射修改 flutter.ndkVersion: ${e.message}")
@@ -54,7 +52,7 @@ gradle.beforeProject {
         val libExt = extensions.findByType<com.android.build.api.dsl.LibraryExtension>()
         if (libExt != null) {
             libExt.compileSdk = 37
-            libExt.compileSdkMinor = 1
+            libExt.compileSdkMinor = 2
         }
     }
 }
