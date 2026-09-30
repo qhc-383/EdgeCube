@@ -3,9 +3,13 @@ import 'dart:async';
 /// 在线资源访问工具类。
 ///
 /// 仅保留静态默认地址与并行请求工具方法，不持有任何状态、不生成设备标识。
-/// 运行环境下载地址的持久化配置由 [NetworkStore] 管理。
+/// 更新检查地址与运行环境下载地址的持久化配置由 [NetworkStore] 管理。
 class OnlineService {
   OnlineService._();
+
+  static const List<String> defaultUpdateCheckUrls = [
+    'https://edgecubemc.com/app/updates.json',
+  ];
 
   static const List<String> defaultEcpkgCatalogUrls = [
     'https://edgecubemc.com/app/ecpkg/list.json',
