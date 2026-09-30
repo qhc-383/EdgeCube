@@ -252,8 +252,8 @@ class _AboutPageState extends State<AboutPage> {
         MiuixSmallTitle(context.tr('about.openSourceLicense')),
         MiuixArrowPreference(
           startAction: prefIcon(Icons.balance),
-          title: 'GNU General Public License v3.0',
-          summary: context.tr('about.gplNotice'),
+          title: 'GNU Affero General Public License v3.0',
+          summary: context.tr('about.agplNotice'),
           onClick: () => Navigator.of(
             context,
           ).push(MaterialPageRoute(builder: (_) => const _LicenseViewerPage())),
@@ -319,7 +319,7 @@ class _AboutPageState extends State<AboutPage> {
   }
 }
 
-/// 内嵌 GPL-3.0 协议全文查看页。
+/// 内嵌 AGPL-3.0 协议全文查看页。
 class _LicenseViewerPage extends StatefulWidget {
   const _LicenseViewerPage();
 
@@ -333,7 +333,7 @@ class _LicenseViewerPageState extends State<_LicenseViewerPage> {
   @override
   void initState() {
     super.initState();
-    rootBundle.loadString('assets/markdown/licenses_gpl_3.0.md').then((t) {
+    rootBundle.loadString('assets/markdown/agpl-3.0.md').then((t) {
       if (mounted) setState(() => _text = t);
     });
   }
@@ -342,7 +342,7 @@ class _LicenseViewerPageState extends State<_LicenseViewerPage> {
   Widget build(BuildContext context) {
     return MiuixScaffold(
       topBar: EcTopAppBar(
-        title: 'GNU General Public License v3.0',
+        title: 'GNU Affero General Public License v3.0',
         showBack: true,
       ),
       content: (padding) => Markdown(

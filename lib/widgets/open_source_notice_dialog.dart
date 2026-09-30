@@ -70,7 +70,7 @@ class _OpenSourceNoticeDialogState extends State<OpenSourceNoticeDialog> {
                   ),
                   const SizedBox(height: 12),
                   const MiuixText(
-                    '本项目基于 GPL-3.0 开源协议发布，源代码托管于 GitHub，'
+                    '本项目基于 AGPL-3.0 开源协议发布，源代码托管于 GitHub、Gitee 及 AtomCode，'
                     '任何人都可以免费获取、使用和修改。\n\n'
                     '本项目不存在任何形式的付费内容，包括但不限于：\n'
                     '• 使用卡密或类似物解锁软件使用权\n'

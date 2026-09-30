@@ -213,8 +213,7 @@ void main() {
       await events.close();
     });
 
-    test('historyBegin 清屏、分片中文拼接、提示符只在 historyEnd 画一次',
-        () async {
+    test('historyBegin 清屏、分片中文拼接、提示符只在 historyEnd 画一次', () async {
       // 画面里先有旧内容，用来证明 historyBegin 真的清了。
       controller.terminal.write('stale\r\n');
       expect(controller.terminal.buffer.getText(), contains('stale'));
@@ -299,7 +298,14 @@ void main() {
       events
         ..add(ShellTermEvent(head))
         ..add(ShellTermEvent(tail))
-        ..add(ShellTermEvent(bytesOf(r'$ /system/bin/sh' '\r\n')));
+        ..add(
+          ShellTermEvent(
+            bytesOf(
+              r'$ /system/bin/sh'
+              '\r\n',
+            ),
+          ),
+        );
       await pumpEventQueue();
 
       expect(controller.terminal.buffer.getText(), contains('中文'));
