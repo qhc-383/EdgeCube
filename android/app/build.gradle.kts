@@ -12,23 +12,34 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(keystorePropertiesFile.inputStream())
 }
 
-// ─── Rust：libedgecube_pty.so（portable-pty PTY 桥）──────────────────────────
+// ─── Rust：libedgecube_pty.so（portable-pty PTY 桥）+ libedgecube_tools.so ────
+//（workspace：rust/ 下含 edgecube-pty 与 edgecube-tools 两个 crate）
 
 val dartRoot = rootProject.projectDir.parentFile
-val rustCrateDir = dartRoot.resolve("rust/edgecube-pty")
+val rustCrateDir = dartRoot.resolve("rust")
 
 // 目标 ABI 需与 `rustup target list --installed` 一致（无 i686，故不含 x86）。
 val rustAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-// cargo-ndk -o 输出 jniLibs 目录结构：<dir>/<abi>/libedgecube_pty.so
+// cargo-ndk -o 输出 jniLibs 目录结构：<dir>/<abi>/lib*.so
 val rustJniLibs = rootProject.layout.buildDirectory.dir("rust/jniLibs").get().asFile
 
 val cargoBuild = tasks.register<Exec>("cargoBuild") {
     group = "build"
-    description = "交叉编译 libedgecube_pty.so（${rustAbis.joinToString()}）到 build/rust/jniLibs"
+    description = "交叉编译 libedgecube_pty.so 与 libedgecube_tools.so（${rustAbis.joinToString()}）到 build/rust/jniLibs"
 
     inputs.files(
         fileTree(rustCrateDir) {
-            include("Cargo.toml", "Cargo.lock", "src/**/*.rs", "tests/**/*.rs")
+            include(
+                "Cargo.toml",
+                "Cargo.lock",
+                "*/Cargo.toml",
+                "src/**/*.rs",
+                "tests/**/*.rs",
+                "*/src/**/*.rs",
+                "*/tests/**/*.rs",
+                "*/build.rs",
+                "*/pthread_stub.c",
+            )
         },
     )
     outputs.dir(rustJniLibs)
@@ -50,6 +61,7 @@ val cargoBuild = tasks.register<Exec>("cargoBuild") {
     workingDir = rustCrateDir
 
     doFirst {
+        outDir.deleteRecursively()
         outDir.mkdirs()
         val probe = ProcessBuilder("cargo", "--version")
             .redirectErrorStream(true)
@@ -57,7 +69,7 @@ val cargoBuild = tasks.register<Exec>("cargoBuild") {
         if (probe.waitFor() != 0) {
             throw GradleException(
                 """
-                找不到 cargo，无法构建 PTY JNI 库（libedgecube_pty.so）。
+                找不到 cargo，无法构建 Rust JNI 库（libedgecube_pty.so / libedgecube_tools.so）。
                 请先安装 Rust 与 cargo-ndk：
                   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
                   cargo install cargo-ndk
@@ -176,18 +188,6 @@ tasks.matching { it.name == "preBuild" }.configureEach {
 }
 
 dependencies {
-    implementation("org.apache.commons:commons-compress:1.28.0")
-    implementation("org.tukaani:xz:1.12")
-    implementation("com.github.luben:zstd-jni:1.5.7-20")
-    implementation("commons-codec:commons-codec:1.22.1")
-    implementation("org.slf4j:slf4j-api:2.0.20")
-    implementation("org.slf4j:slf4j-jdk14:2.0.20")
-    implementation("com.github.junrar:junrar:8.1.1")
-    implementation("org.apache.ftpserver:ftpserver-core:1.2.1")
-    implementation("org.apache.sshd:sshd-core:3.0.0-M5")
-    implementation("org.apache.sshd:sshd-sftp:3.0.0-M5")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.86")
-    implementation("org.bouncycastle:bcpkix-jdk18on:1.86")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     implementation("androidx.core:core-ktx:1.19.0")
 }

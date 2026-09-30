@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["edgecube-pty", "edgecube-tools"]
+
+[workspace.package]
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+jni = "0.21"
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = true
+overflow-checks = false
+debug-assertions = false
+

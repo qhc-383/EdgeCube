@@ -1,6 +1,5 @@
 //! 控制台帧与订阅者接口。
 
-
 use std::sync::Arc;
 
 /// 发给订阅者的一帧。
@@ -20,7 +19,6 @@ pub enum OutFrame {
 }
 
 /// 一端订阅者。实现方**必须是非阻塞的**。
-
 pub trait FrameSink: Send + Sync {
     fn send(&self, frame: OutFrame);
 }

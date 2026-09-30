@@ -1,18 +1,6 @@
 import 'package:flutter/services.dart';
 
-/// 当前设备不支持 SSH 服务（Android < 8.0，SSHD 依赖 API 26 的 java.nio.file）。
-class SshUnsupportedApiException implements Exception {
-  const SshUnsupportedApiException();
-
-  @override
-  String toString() => 'SshUnsupportedApiException';
-}
-
 /// SSH 服务的平台通道封装。
-///
-/// 实际 SSH 服务器在 Android 原生侧运行（见 `SshServerManager.kt`），基于 Apache MINA SSHD，
-/// 同一服务器同时提供 SFTP 文件访问与 SSH 终端（shell 通道桥接到自带 PTY），共用端口、
-/// 账号与主机密钥，供外部设备（电脑、手机）通过 `sftp` / `ssh` 客户端访问。
 class SshService {
   SshService._();
 
@@ -35,23 +23,16 @@ class SshService {
     required bool shellEnabled,
     required bool ipv6Enabled,
   }) async {
-    try {
-      await _channel.invokeMethod<void>('start', {
-        'rootDir': rootDir,
-        'port': port,
-        'username': username,
-        'password': password,
-        'writable': writable,
-        'sftpEnabled': sftpEnabled,
-        'shellEnabled': shellEnabled,
-        'ipv6Enabled': ipv6Enabled,
-      });
-    } on PlatformException catch (e) {
-      if (e.code == 'SSH_NEEDS_API26') {
-        throw const SshUnsupportedApiException();
-      }
-      rethrow;
-    }
+    await _channel.invokeMethod<void>('start', {
+      'rootDir': rootDir,
+      'port': port,
+      'username': username,
+      'password': password,
+      'writable': writable,
+      'sftpEnabled': sftpEnabled,
+      'shellEnabled': shellEnabled,
+      'ipv6Enabled': ipv6Enabled,
+    });
   }
 
   /// 停止 SSH 服务。

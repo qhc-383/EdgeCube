@@ -1,6 +1,5 @@
 //! 输出历史 + 订阅者扇出。
 
-
 use std::collections::{HashMap, VecDeque};
 
 use crate::frame::{OutFrame, SharedSink};

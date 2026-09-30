@@ -1,0 +1,34 @@
+[env]
+CXXFLAGS_aarch64_linux_android = "-DUNIX_TIME_NS"
+CXXFLAGS_armv7_linux_androideabi = "-DUNIX_TIME_NS"
+CXXFLAGS_x86_64_linux_android = "-DUNIX_TIME_NS"
+
+[target.aarch64-linux-android]
+rustflags = [
+    "-C", "link-arg=-Wl,--exclude-libs=ALL",
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "link-arg=-Wl,--icf=all",
+    "-C", "link-arg=-lc++_static",
+    "-C", "link-arg=-lc++abi",
+    "-C", "link-arg=-Wl,--no-undefined",
+]
+
+[target.armv7-linux-androideabi]
+rustflags = [
+    "-C", "link-arg=-Wl,--exclude-libs=ALL",
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "link-arg=-Wl,--icf=all",
+    "-C", "link-arg=-lc++_static",
+    "-C", "link-arg=-lc++abi",
+    "-C", "link-arg=-Wl,--no-undefined",
+]
+
+[target.x86_64-linux-android]
+rustflags = [
+    "-C", "link-arg=-Wl,--exclude-libs=ALL",
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "link-arg=-Wl,--icf=all",
+    "-C", "link-arg=-lc++_static",
+    "-C", "link-arg=-lc++abi",
+    "-C", "link-arg=-Wl,--no-undefined",
+]

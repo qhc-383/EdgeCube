@@ -1,15 +1,6 @@
--dontwarn org.apache.commons.codec.digest.XXHash32
--dontwarn org.slf4j.impl.StaticLoggerBinder
--dontwarn org.apache.ftpserver.**
--dontwarn org.apache.mina.**
--keep class org.apache.ftpserver.** { *; }
--keep class org.apache.mina.** { *; }
--keep class org.apache.sshd.** { *; }
--dontwarn org.apache.sshd.**
--keep class org.bouncycastle.** { *; }
--dontwarn org.bouncycastle.**
--keep class * implements org.apache.sshd.common.util.security.SecurityProviderRegistrar { *; }
--keep class * implements org.apache.sshd.common.io.IoServiceFactoryFactory { *; }
--dontwarn java.nio.file.**
 -keep class com.venti1112.edgecube.pty.PtyBridge { *; }
 -keep interface com.venti1112.edgecube.pty.FrameListener { *; }
+-keep class com.venti1112.edgecube.files.ArchiveBridge { *; }
+-keep interface com.venti1112.edgecube.files.ArchiveProgressListener { *; }
+-keep class com.venti1112.edgecube.ftp.FtpBridge { *; }
+-keep class com.venti1112.edgecube.ssh.SshBridge { *; }
